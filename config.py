@@ -1,18 +1,26 @@
-"""Configuration settings for YouTube Shorts Generator."""
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Base Paths
 BASE_DIR = Path(__file__).parent.resolve()
+load_dotenv(BASE_DIR / ".env")
+
 ASSETS_DIR = BASE_DIR / "assets"
 IMAGES_DIR = ASSETS_DIR / "images"
+VIDEOS_DIR = ASSETS_DIR / "videos"
 MUSIC_DIR = ASSETS_DIR / "music"
 OUTPUT_DIR = BASE_DIR / "output"
 CACHE_DIR = BASE_DIR / "cache"
 
 # Ensure directories exist
-for p in [IMAGES_DIR, MUSIC_DIR, OUTPUT_DIR, CACHE_DIR]:
+for p in [IMAGES_DIR, VIDEOS_DIR, MUSIC_DIR, OUTPUT_DIR, CACHE_DIR]:
     p.mkdir(parents=True, exist_ok=True)
+
+# Pexels API Settings (100% Free API key from pexels.com/api)
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
+PREFER_STOCK_VIDEOS = True  # Prioritize downloading real stock video clips over static photos
+
 
 # Video Specs (YouTube Shorts: 9:16 vertical)
 VIDEO_WIDTH = 1080

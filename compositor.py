@@ -23,17 +23,43 @@ def get_ffmpeg_binary() -> str:
     return imageio_ffmpeg.get_ffmpeg_exe()
 
 def create_segment_clip(
-    image_path: Path,
+    media_path: Path,
     duration: float,
     output_clip_path: Path,
     zoom_in: bool = True
 ) -> Path:
     """
-    Creates an animated 1080x1920 30fps MP4 segment from a static image
-    using a subtle, smooth Ken Burns zoom effect.
+    Creates an animated 1080x1920 30fps MP4 segment from either:
+    - A stock video clip (center-cropped, looped if needed, trimmed to duration)
+    - A static stock image (Ken Burns zoompan animation)
     """
     ffmpeg_exe = get_ffmpeg_binary()
     output_clip_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    is_video = media_path.suffix.lower() in [".mp4", ".mov", ".webm", ".mkv"]
+    
+    if is_video:
+        vf_filter = (
+            f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={VIDEO_WIDTH}:{VIDEO_HEIGHT},fps={VIDEO_FPS}"
+        )
+        cmd = [
+            ffmpeg_exe,
+            "-y",
+            "-stream_loop", "-1",
+            "-i", str(media_path.resolve()),
+            "-vf", vf_filter,
+            "-t", f"{duration:.3f}",
+            "-an",
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-preset", "ultrafast",
+            str(output_clip_path.resolve())
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode == 0:
+            return output_clip_path
+        # If video processing failed, fallback to treating as static frame
     
     total_frames = max(1, int(duration * VIDEO_FPS))
     
@@ -43,7 +69,6 @@ def create_segment_clip(
     else:
         zoom_expr = "if(eq(on,1),1.25,max(1.0,pzoom-0.0015))"
         
-    # Scale to fill, apply zoompan, then output exact 1080x1920
     vf_filter = (
         f"scale=-1:2160,crop=1215:2160,"
         f"zoompan=z='{zoom_expr}':d={total_frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s={VIDEO_WIDTH}x{VIDEO_HEIGHT}:fps={VIDEO_FPS}"
@@ -53,24 +78,23 @@ def create_segment_clip(
         ffmpeg_exe,
         "-y",
         "-loop", "1",
-        "-i", str(image_path),
+        "-i", str(media_path.resolve()),
         "-vf", vf_filter,
         "-t", f"{duration:.3f}",
         "-c:v", "libx264",
         "-pix_fmt", "yuv420p",
         "-preset", "ultrafast",
-        str(output_clip_path)
+        str(output_clip_path.resolve())
     ]
     
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
-        # Fallback to simple static scale if zoompan fails on rare image dimensions
         fallback_vf = f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT}:force_original_aspect_ratio=increase,crop={VIDEO_WIDTH}:{VIDEO_HEIGHT},fps={VIDEO_FPS}"
         cmd_fallback = [
-            ffmpeg_exe, "-y", "-loop", "1", "-i", str(image_path),
+            ffmpeg_exe, "-y", "-loop", "1", "-i", str(media_path.resolve()),
             "-vf", fallback_vf, "-t", f"{duration:.3f}",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast",
-            str(output_clip_path)
+            str(output_clip_path.resolve())
         ]
         subprocess.run(cmd_fallback, check=True)
         
