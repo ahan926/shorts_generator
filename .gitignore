@@ -1,0 +1,22 @@
+# Virtual Environment
+.venv/
+env/
+venv/
+
+# Cache & Build artifacts
+__pycache__/
+*.pyc
+cache/
+
+# Video outputs (too large for standard git)
+output/*.mp4
+output/*.jpg
+
+# Sensitive Credentials (OAuth tokens)
+client_secrets.json
+token.json
+.env
+
+# OS Files
+.DS_Store
+Thumbs.db

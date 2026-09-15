@@ -1,0 +1,15 @@
+[project]
+name = "shorts-generator"
+version = "0.1.0"
+description = "Automated 100% royalty-free YouTube Shorts generator with stock images, edge-tts, and dynamic subtitles."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "edge-tts>=6.1.12",
+    "imageio-ffmpeg>=0.5.1",
+    "requests>=2.31.0",
+    "pillow>=10.0.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth-oauthlib>=1.1.0",
+    "google-auth-httplib2>=0.2.0",
+]
