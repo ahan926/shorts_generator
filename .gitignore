@@ -8,9 +8,10 @@ __pycache__/
 *.pyc
 cache/
 
-# Video outputs (too large for standard git)
-output/*.mp4
-output/*.jpg
+# Video outputs & Generated artifacts
+output/
+test_*
+
 
 # Sensitive Credentials (OAuth tokens)
 client_secrets.json
