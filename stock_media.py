@@ -4,6 +4,7 @@ Wikipedia/Wikimedia Commons (Free Public Domain), local folders, and fallback gr
 import os
 import random
 import requests
+import re
 from pathlib import Path
 from typing import List, Optional
 from PIL import Image, ImageDraw
@@ -54,63 +55,26 @@ def generate_procedural_background(output_path: Path, theme: str = "curiosity") 
     img.save(output_path, quality=95)
     return output_path
 
-def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
-    """
-    Searches and downloads a royalty-free portrait stock video from Pexels Video API.
-    Requires free PEXELS_API_KEY from pexels.com/api.
-    """
-    api_key = PEXELS_API_KEY or os.getenv("PEXELS_API_KEY", "")
-    if not api_key:
-        return None
-        
+def fetch_pexels_video_scrape(keyword: str, output_path: Path) -> Optional[Path]:
+    """Downloads portrait stock video from Pexels web search without requiring an API key."""
     try:
-        url = "https://api.pexels.com/videos/search"
-        headers = {"Authorization": api_key, "User-Agent": "ShortsPipeline/1.0"}
-        params = {
-            "query": keyword,
-            "orientation": "portrait",
-            "per_page": 5
+        url = f"https://www.pexels.com/search/videos/{keyword.replace(' ', '%20')}/?orientation=portrait"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         }
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
+        resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code != 200:
             return None
             
-        data = resp.json()
-        videos = data.get("videos", [])
-        if not videos:
-            # Try a broader search without strict orientation
-            params.pop("orientation", None)
-            resp = requests.get(url, headers=headers, params=params, timeout=10)
-            if resp.status_code == 200:
-                videos = resp.json().get("videos", [])
-                
-        if not videos:
+        mp4s = re.findall(r'https://videos\.pexels\.com/video-files/[^\s"\'<>]+\.mp4', resp.text)
+        if not mp4s:
             return None
             
-        chosen_video = random.choice(videos)
-        video_files = chosen_video.get("video_files", [])
+        best_mp4s = [u for u in mp4s if "1080_1920" in u or "720_1280" in u] or mp4s
+        chosen_url = random.choice(best_mp4s)
         
-        # Pick best portrait MP4 file (prefer 1080x1920 or 720x1280)
-        chosen_file = None
-        for vf in video_files:
-            if vf.get("file_type") == "video/mp4":
-                # Prefer HD portrait
-                w = vf.get("width") or 0
-                h = vf.get("height") or 0
-                if h > w:  # Portrait
-                    chosen_file = vf
-                    break
-        if not chosen_file and video_files:
-            chosen_file = video_files[0]
-            
-        if not chosen_file:
-            return None
-            
-        download_url = chosen_file.get("link")
-        if not download_url:
-            return None
-            
-        vid_resp = requests.get(download_url, stream=True, timeout=30)
+        vid_resp = requests.get(chosen_url, headers=headers, stream=True, timeout=30)
         if vid_resp.status_code == 200:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with open(output_path, "wb") as f:
@@ -120,46 +84,104 @@ def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
             if output_path.stat().st_size > 50000:
                 return output_path
     except Exception as e:
-        print(f"[Pexels Video] Search failed for '{keyword}': {e}")
-        
+        pass
     return None
 
-def fetch_pexels_image(keyword: str, output_path: Path) -> Optional[Path]:
+def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
     """
-    Searches and downloads high-res portrait stock photo from Pexels Photo API.
+    Searches and downloads a royalty-free portrait stock video from Pexels.
+    Uses official API if key provided, otherwise uses high-speed web video search.
     """
     api_key = PEXELS_API_KEY or os.getenv("PEXELS_API_KEY", "")
-    if not api_key:
-        return None
-        
-    try:
-        url = "https://api.pexels.com/v1/search"
-        headers = {"Authorization": api_key, "User-Agent": "ShortsPipeline/1.0"}
-        params = {"query": keyword, "orientation": "portrait", "per_page": 5}
-        resp = requests.get(url, headers=headers, params=params, timeout=10)
-        if resp.status_code != 200:
-            return None
-            
-        photos = resp.json().get("photos", [])
-        if not photos:
-            params.pop("orientation", None)
+    if api_key:
+        try:
+            url = "https://api.pexels.com/videos/search"
+            headers = {"Authorization": api_key, "User-Agent": "ShortsPipeline/1.0"}
+            params = {
+                "query": keyword,
+                "orientation": "portrait",
+                "per_page": 5
+            }
             resp = requests.get(url, headers=headers, params=params, timeout=10)
             if resp.status_code == 200:
-                photos = resp.json().get("photos", [])
-                
-        if photos:
-            chosen = random.choice(photos)
-            photo_url = chosen.get("src", {}).get("large2x") or chosen.get("src", {}).get("original")
-            if photo_url:
-                img_data = requests.get(photo_url, timeout=15).content
+                data = resp.json()
+                videos = data.get("videos", [])
+                if videos:
+                    chosen_video = random.choice(videos)
+                    video_files = chosen_video.get("video_files", [])
+                    chosen_file = None
+                    for vf in video_files:
+                        if vf.get("file_type") == "video/mp4":
+                            w = vf.get("width") or 0
+                            h = vf.get("height") or 0
+                            if h > w:
+                                chosen_file = vf
+                                break
+                    if not chosen_file and video_files:
+                        chosen_file = video_files[0]
+                    if chosen_file and chosen_file.get("link"):
+                        vid_resp = requests.get(chosen_file["link"], stream=True, timeout=30)
+                        if vid_resp.status_code == 200:
+                            output_path.parent.mkdir(parents=True, exist_ok=True)
+                            with open(output_path, "wb") as f:
+                                for chunk in vid_resp.iter_content(chunk_size=1024 * 64):
+                                    if chunk:
+                                        f.write(chunk)
+                            if output_path.stat().st_size > 50000:
+                                return output_path
+        except Exception as e:
+            print(f"[Pexels API Video] Failed for '{keyword}': {e}")
+            
+    # Fallback to direct web video downloader
+    return fetch_pexels_video_scrape(keyword, output_path)
+
+def fetch_pexels_image_scrape(keyword: str, output_path: Path) -> Optional[Path]:
+    """Downloads high-res portrait stock photo from Pexels web search."""
+    try:
+        url = f"https://www.pexels.com/search/{keyword.replace(' ', '%20')}/?orientation=portrait"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        }
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return None
+        imgs = re.findall(r'https://images\.pexels\.com/photos/[^\s"\'<>]+\.jpeg[^\s"\'<>]*', resp.text)
+        if imgs:
+            chosen = random.choice(imgs[:8])
+            img_data = requests.get(chosen, headers=headers, timeout=15).content
+            if len(img_data) > 10000:
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(output_path, "wb") as f:
                     f.write(img_data)
                 return output_path
-    except Exception as e:
-        print(f"[Pexels Photo] Search failed for '{keyword}': {e}")
-        
+    except Exception:
+        pass
     return None
+
+def fetch_pexels_image(keyword: str, output_path: Path) -> Optional[Path]:
+    """Searches and downloads high-res portrait stock photo from Pexels."""
+    api_key = PEXELS_API_KEY or os.getenv("PEXELS_API_KEY", "")
+    if api_key:
+        try:
+            url = "https://api.pexels.com/v1/search"
+            headers = {"Authorization": api_key, "User-Agent": "ShortsPipeline/1.0"}
+            params = {"query": keyword, "orientation": "portrait", "per_page": 5}
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            if resp.status_code == 200:
+                photos = resp.json().get("photos", [])
+                if photos:
+                    chosen = random.choice(photos)
+                    photo_url = chosen.get("src", {}).get("large2x") or chosen.get("src", {}).get("original")
+                    if photo_url:
+                        img_data = requests.get(photo_url, timeout=15).content
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(output_path, "wb") as f:
+                            f.write(img_data)
+                        return output_path
+        except Exception as e:
+            print(f"[Pexels API Photo] Failed for '{keyword}': {e}")
+            
+    return fetch_pexels_image_scrape(keyword, output_path)
 
 def fetch_wikimedia_image(keyword: str, output_path: Path) -> Optional[Path]:
     """
