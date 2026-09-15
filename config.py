@@ -21,6 +21,10 @@ for p in [IMAGES_DIR, VIDEOS_DIR, MUSIC_DIR, OUTPUT_DIR, CACHE_DIR]:
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
 PREFER_STOCK_VIDEOS = True  # Prioritize downloading real stock video clips over static photos
 
+# Default Call to Action (Appended to all shorts for subscriber growth)
+DEFAULT_CTA = "For more related content, make sure you subscribe for daily uploads."
+
+
 
 # Video Specs (YouTube Shorts: 9:16 vertical)
 VIDEO_WIDTH = 1080

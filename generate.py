@@ -19,7 +19,8 @@ from config import (
     CACHE_DIR,
     MUSIC_DIR,
     DEFAULT_VOICE,
-    BASE_DIR
+    BASE_DIR,
+    DEFAULT_CTA
 )
 from tts_engine import generate_voiceover
 from subtitles import generate_ass_subtitles
@@ -44,12 +45,21 @@ def process_short(
     keywords: List[str],
     title: Optional[str] = None,
     description: Optional[str] = None,
-    voice: str = DEFAULT_VOICE
+    voice: str = DEFAULT_VOICE,
+    append_cta: bool = True
 ) -> Path:
     """End-to-end pipeline to generate a single Short."""
     print(f"\n==================================================")
     print(f"🎬 Generating Short: '{script_id}'")
     print(f"==================================================")
+    
+    # Automatically append channel subscription CTA if not already present
+    text = text.strip()
+    if append_cta and DEFAULT_CTA and not text.endswith(DEFAULT_CTA):
+        if not text.endswith((".", "!", "?")):
+            text += "."
+        text += f" {DEFAULT_CTA}"
+
     
     start_time = time.time()
     work_dir = CACHE_DIR / script_id
