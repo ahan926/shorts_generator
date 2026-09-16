@@ -52,9 +52,11 @@ SUBTITLE_OUTLINE_COLOR = "&H00000000&"   # Deep black outline
 SUBTITLE_OUTLINE_WIDTH = 4
 SUBTITLE_SHADOW_DEPTH = 2
 
-# Vertical placement (MarginV in pixels from bottom)
-# For 1920 height, center safe zone is around 900-1100 to avoid UI overlays
+# Vertical placement & Center Coordinates
+SUBTITLE_POS_X = 540  # Exactly 1080 / 2 (Dead Center horizontally)
+SUBTITLE_POS_Y = 960  # Exactly 1920 / 2 (Dead Center vertically)
 SUBTITLE_MARGIN_V = 960
+
 
 # Background Audio
 MUSIC_VOLUME = 0.10  # 10% volume (ducked under voiceover)

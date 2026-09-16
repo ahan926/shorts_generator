@@ -12,6 +12,8 @@ from config import (
     SUBTITLE_OUTLINE_WIDTH,
     SUBTITLE_SHADOW_DEPTH,
     SUBTITLE_MARGIN_V,
+    SUBTITLE_POS_X,
+    SUBTITLE_POS_Y,
 )
 
 def format_ass_time(seconds: float) -> str:
@@ -77,8 +79,8 @@ def generate_ass_subtitles(
         "",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        # Alignment 2 = Bottom-Center. MarginV places it in the vertical center safe zone.
-        f"Style: Default,{SUBTITLE_FONT},{SUBTITLE_FONT_SIZE},{SUBTITLE_PRIMARY_COLOR},{SUBTITLE_HIGHLIGHT_COLOR},{SUBTITLE_OUTLINE_COLOR},&H80000000,-1,0,0,0,100,100,1,0,1,{SUBTITLE_OUTLINE_WIDTH},{SUBTITLE_SHADOW_DEPTH},2,60,180,{SUBTITLE_MARGIN_V},1",
+        # Alignment 5 = Middle-Center. Exactly dead-center of screen.
+        f"Style: Default,{SUBTITLE_FONT},{SUBTITLE_FONT_SIZE},{SUBTITLE_PRIMARY_COLOR},{SUBTITLE_HIGHLIGHT_COLOR},{SUBTITLE_OUTLINE_COLOR},&H80000000,-1,0,0,0,100,100,1,0,1,{SUBTITLE_OUTLINE_WIDTH},{SUBTITLE_SHADOW_DEPTH},5,0,0,0,1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -101,12 +103,13 @@ def generate_ass_subtitles(
                 raw_text = clean_word(w["word"]).upper()
                 if i == j:
                     # Highlight active word in Yellow with slight pop
-                    formatted_tokens.append(f"{{\\c{SUBTITLE_HIGHLIGHT_COLOR}\\fscx110\\fscy110}}{raw_text}{{\\r}}")
+                    formatted_tokens.append(f"{{\\c{SUBTITLE_HIGHLIGHT_COLOR}\\fscx108\\fscy108}}{raw_text}{{\\fscx100\\fscy100}}")
                 else:
                     # Inactive words in crisp White
-                    formatted_tokens.append(f"{{\\c{SUBTITLE_PRIMARY_COLOR}\\fscx100\\fscy100}}{raw_text}{{\\r}}")
+                    formatted_tokens.append(f"{{\\c{SUBTITLE_PRIMARY_COLOR}}}{raw_text}")
             
-            line_text = " ".join(formatted_tokens)
+            # pos(540, 960) locks text dead-center horizontally and vertically
+            line_text = f"{{\\pos({SUBTITLE_POS_X},{SUBTITLE_POS_Y})}}" + " ".join(formatted_tokens)
             ass_content.append(f"Dialogue: 0,{start_str},{end_str},Default,,0,0,0,,{line_text}")
 
     output_ass_path.write_text("\n".join(ass_content), encoding="utf-8")
