@@ -72,7 +72,7 @@ def fetch_pexels_video_scrape(keyword: str, output_path: Path) -> Optional[Path]
             return None
             
         best_mp4s = [u for u in mp4s if "1080_1920" in u or "720_1280" in u] or mp4s
-        chosen_url = random.choice(best_mp4s)
+        chosen_url = best_mp4s[0]
         
         vid_resp = requests.get(chosen_url, headers=headers, stream=True, timeout=30)
         if vid_resp.status_code == 200:
@@ -87,6 +87,8 @@ def fetch_pexels_video_scrape(keyword: str, output_path: Path) -> Optional[Path]
         pass
     return None
 
+USED_VIDEO_IDS = set()
+
 def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
     """
     Searches and downloads a royalty-free portrait stock video from Pexels.
@@ -100,14 +102,26 @@ def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
             params = {
                 "query": keyword,
                 "orientation": "portrait",
-                "per_page": 5
+                "per_page": 8
             }
             resp = requests.get(url, headers=headers, params=params, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
                 videos = data.get("videos", [])
                 if videos:
-                    chosen_video = random.choice(videos)
+                    # Pick highest-ranked relevant video not already used
+                    chosen_video = None
+                    for v in videos:
+                        if v.get("id") not in USED_VIDEO_IDS:
+                            chosen_video = v
+                            break
+                    if not chosen_video:
+                        chosen_video = videos[0]
+                    USED_VIDEO_IDS.add(chosen_video.get("id"))
+                    
+                    vid_url_slug = chosen_video.get("url", "")
+                    if vid_url_slug:
+                        print(f"   [Pexels Match] '{keyword}' -> {vid_url_slug}")
                     video_files = chosen_video.get("video_files", [])
                     chosen_file = None
                     for vf in video_files:
