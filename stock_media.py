@@ -91,58 +91,92 @@ USED_VIDEO_IDS = set()
 
 def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
     """
-    Searches and downloads a royalty-free portrait stock video from Pexels.
-    Uses official API if key provided, otherwise uses high-speed web video search.
+    Searches and downloads a royalty-free stock video from Pexels.
+    Strictly verifies that the primary subject appears in the video URL/metadata
+    to prevent off-topic videos (e.g. fish in an octopus video).
     """
     api_key = PEXELS_API_KEY or os.getenv("PEXELS_API_KEY", "")
     if api_key:
         try:
             url = "https://api.pexels.com/videos/search"
             headers = {"Authorization": api_key, "User-Agent": "ShortsPipeline/1.0"}
-            params = {
-                "query": keyword,
-                "orientation": "portrait",
-                "per_page": 8
-            }
+            
+            # Identify core subject token (ignoring common modifiers)
+            stop_words = {"the", "and", "with", "from", "in", "on", "at", "for", "close", "up", "view", "scene", "background", "macro", "video", "shot", "footage", "nature", "underwater", "deep", "great"}
+            tokens = [w.lower() for w in keyword.split() if w.lower() not in stop_words and len(w) >= 3]
+            primary_subject = tokens[0] if tokens else keyword.lower().split()[0]
+            
+            # 1. Search with portrait orientation first
+            params = {"query": keyword, "orientation": "portrait", "per_page": 10}
             resp = requests.get(url, headers=headers, params=params, timeout=10)
-            if resp.status_code == 200:
-                data = resp.json()
-                videos = data.get("videos", [])
-                if videos:
-                    # Pick highest-ranked relevant video not already used
-                    chosen_video = None
-                    for v in videos:
-                        if v.get("id") not in USED_VIDEO_IDS:
-                            chosen_video = v
-                            break
-                    if not chosen_video:
-                        chosen_video = videos[0]
-                    USED_VIDEO_IDS.add(chosen_video.get("id"))
+            videos = resp.json().get("videos", []) if resp.status_code == 200 else []
+            
+            # Filter videos containing primary_subject in slug/image
+            matched_videos = []
+            for v in videos:
+                if v.get("id") in USED_VIDEO_IDS:
+                    continue
+                slug = (v.get("url", "") + " " + v.get("image", "")).lower()
+                if primary_subject in slug:
+                    matched_videos.append(v)
                     
-                    vid_url_slug = chosen_video.get("url", "")
-                    if vid_url_slug:
-                        print(f"   [Pexels Match] '{keyword}' -> {vid_url_slug}")
-                    video_files = chosen_video.get("video_files", [])
-                    chosen_file = None
-                    for vf in video_files:
-                        if vf.get("file_type") == "video/mp4":
-                            w = vf.get("width") or 0
-                            h = vf.get("height") or 0
-                            if h > w:
-                                chosen_file = vf
-                                break
-                    if not chosen_file and video_files:
-                        chosen_file = video_files[0]
-                    if chosen_file and chosen_file.get("link"):
-                        vid_resp = requests.get(chosen_file["link"], stream=True, timeout=30)
-                        if vid_resp.status_code == 200:
-                            output_path.parent.mkdir(parents=True, exist_ok=True)
-                            with open(output_path, "wb") as f:
-                                for chunk in vid_resp.iter_content(chunk_size=1024 * 64):
-                                    if chunk:
-                                        f.write(chunk)
-                            if output_path.stat().st_size > 50000:
-                                return output_path
+            # 2. If no subject match in portrait, search without orientation constraint
+            # (compositor automatically center-crops and scales widescreen video to 1080x1920)
+            if not matched_videos:
+                params_any = {"query": keyword, "per_page": 12}
+                resp_any = requests.get(url, headers=headers, params=params_any, timeout=10)
+                if resp_any.status_code == 200:
+                    for v in resp_any.json().get("videos", []):
+                        if v.get("id") in USED_VIDEO_IDS:
+                            continue
+                        slug = (v.get("url", "") + " " + v.get("image", "")).lower()
+                        if primary_subject in slug:
+                            matched_videos.append(v)
+                            
+            # 3. If still no subject match, query primary subject directly
+            if not matched_videos and len(tokens) > 1:
+                params_sub = {"query": primary_subject, "per_page": 12}
+                resp_sub = requests.get(url, headers=headers, params=params_sub, timeout=10)
+                if resp_sub.status_code == 200:
+                    for v in resp_sub.json().get("videos", []):
+                        if v.get("id") in USED_VIDEO_IDS:
+                            continue
+                        slug = (v.get("url", "") + " " + v.get("image", "")).lower()
+                        if primary_subject in slug:
+                            matched_videos.append(v)
+                            
+            chosen_video = matched_videos[0] if matched_videos else (videos[0] if videos else None)
+            if chosen_video:
+                USED_VIDEO_IDS.add(chosen_video.get("id"))
+                vid_url_slug = chosen_video.get("url", "")
+                if vid_url_slug:
+                    print(f"   [Pexels Verified Match] '{keyword}' -> {vid_url_slug}")
+                    
+                video_files = chosen_video.get("video_files", [])
+                chosen_file = None
+                # Prioritize vertical MP4 if available
+                for vf in video_files:
+                    if vf.get("file_type") == "video/mp4":
+                        w = vf.get("width") or 0
+                        h = vf.get("height") or 0
+                        if h > w:
+                            chosen_file = vf
+                            break
+                if not chosen_file and video_files:
+                    # Pick best available MP4 file
+                    mp4s = [f for f in video_files if f.get("file_type") == "video/mp4"]
+                    chosen_file = mp4s[0] if mp4s else video_files[0]
+                    
+                if chosen_file and chosen_file.get("link"):
+                    vid_resp = requests.get(chosen_file["link"], stream=True, timeout=30)
+                    if vid_resp.status_code == 200:
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        with open(output_path, "wb") as f:
+                            for chunk in vid_resp.iter_content(chunk_size=1024 * 64):
+                                if chunk:
+                                    f.write(chunk)
+                        if output_path.stat().st_size > 50000:
+                            return output_path
         except Exception as e:
             print(f"[Pexels API Video] Failed for '{keyword}': {e}")
             
