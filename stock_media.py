@@ -102,9 +102,17 @@ def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
             headers = {"Authorization": api_key, "User-Agent": "ShortsPipeline/1.0"}
             
             # Identify core subject token (ignoring common modifiers)
-            stop_words = {"the", "and", "with", "from", "in", "on", "at", "for", "close", "up", "view", "scene", "background", "macro", "video", "shot", "footage", "nature", "underwater", "deep", "great"}
+            stop_words = {
+                "the", "and", "with", "from", "in", "on", "at", "for", "close", "up", "view",
+                "scene", "background", "macro", "video", "shot", "footage", "nature", "underwater",
+                "deep", "great", "african", "polar", "arctic", "antarctic", "majestic", "scenic",
+                "beautiful", "massive", "giant", "tiny", "huge", "wild", "yellowstone", "icelandic",
+                "planet", "super", "extreme", "colossal", "emperor", "hot", "cold", "vibrant"
+            }
             tokens = [w.lower() for w in keyword.split() if w.lower() not in stop_words and len(w) >= 3]
             primary_subject = tokens[0] if tokens else keyword.lower().split()[0]
+            # Singular stem if plural (e.g. penguins -> penguin, bears -> bear)
+            primary_stem = primary_subject[:-1] if (primary_subject.endswith('s') and len(primary_subject) > 4 and not primary_subject.endswith(('ss', 'us', 'is'))) else primary_subject
             
             # 1. Search with portrait orientation first
             params = {"query": keyword, "orientation": "portrait", "per_page": 10}
@@ -117,7 +125,7 @@ def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
                 if v.get("id") in USED_VIDEO_IDS:
                     continue
                 slug = (v.get("url", "") + " " + v.get("image", "")).lower()
-                if primary_subject in slug:
+                if primary_subject in slug or primary_stem in slug:
                     matched_videos.append(v)
                     
             # 2. If no subject match in portrait, search without orientation constraint
@@ -130,7 +138,7 @@ def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
                         if v.get("id") in USED_VIDEO_IDS:
                             continue
                         slug = (v.get("url", "") + " " + v.get("image", "")).lower()
-                        if primary_subject in slug:
+                        if primary_subject in slug or primary_stem in slug:
                             matched_videos.append(v)
                             
             # 3. If still no subject match, query primary subject directly
@@ -142,7 +150,7 @@ def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
                         if v.get("id") in USED_VIDEO_IDS:
                             continue
                         slug = (v.get("url", "") + " " + v.get("image", "")).lower()
-                        if primary_subject in slug:
+                        if primary_subject in slug or primary_stem in slug:
                             matched_videos.append(v)
                             
             chosen_video = matched_videos[0] if matched_videos else (videos[0] if videos else None)
