@@ -1,9 +1,10 @@
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 # Ensure UTF-8 output on Windows consoles
 if sys.platform == "win32":
@@ -24,9 +25,57 @@ from config import (
 )
 from tts_engine import generate_voiceover
 from subtitles import generate_ass_subtitles
-from stock_media import get_visual_for_segment
+from stock_media import get_visual_for_segment, reset_used_media
 from compositor import assemble_short_video
 from audio_ambient import generate_ambient_track
+
+def compute_sentence_durations(
+    text: str,
+    words: List[Dict[str, Any]],
+    total_duration: float,
+    expected_segments: int
+) -> Optional[List[float]]:
+    """
+    Calculates the exact spoken duration of each sentence based on word timestamps,
+    so that visual cuts happen right on sentence boundaries.
+    """
+    raw_sentences = [s.strip() for s in re.split(r'[\.\!\?]+', text) if s.strip()]
+    if not raw_sentences or not words:
+        return None
+    
+    durations = []
+    w_idx = 0
+    prev_time = 0.0
+    
+    for sent in raw_sentences:
+        tokens = re.findall(r'\b[A-Za-z0-9]+\b', sent)
+        if not tokens:
+            continue
+        last_word = tokens[-1].lower()
+        
+        match_idx = None
+        for idx in range(w_idx, len(words)):
+            w_clean = re.sub(r'[^A-Za-z0-9]', '', words[idx]['word'].lower())
+            if w_clean == last_word or w_clean.endswith(last_word):
+                match_idx = idx
+                break
+                
+        if match_idx is not None:
+            end_time = words[match_idx]['end']
+            w_idx = match_idx + 1
+        else:
+            end_time = prev_time + (total_duration / len(raw_sentences))
+            
+        dur = max(1.5, end_time - prev_time)
+        durations.append(dur)
+        prev_time = end_time
+
+    if len(durations) == expected_segments:
+        diff = total_duration - sum(durations)
+        durations[-1] = max(1.5, durations[-1] + diff)
+        return [round(d, 3) for d in durations]
+        
+    return None
 
 def ensure_background_music() -> Path:
     """Ensures a royalty-free ambient background audio file exists."""
@@ -52,6 +101,9 @@ def process_short(
     print(f"\n==================================================")
     print(f"🎬 Generating Short: '{script_id}'")
     print(f"==================================================")
+    
+    # Reset used media for this Short so all segments are unique within the video
+    reset_used_media()
     
     # Automatically append channel subscription CTA if not already present
     text = text.strip()
@@ -79,16 +131,23 @@ def process_short(
     sub_path = work_dir / "subtitles.ass"
     generate_ass_subtitles(words, sub_path, words_per_phrase=3)
     
-    # 4. Visual Media
-    print(f"🖼️  Step 3/4: Fetching {len(keywords)} royalty-free visuals...")
+    # 4. Sentence-Aligned Segment Durations
+    segment_durations = compute_sentence_durations(text, words, duration, expected_segments=len(keywords))
+    if segment_durations:
+        print(f"   ⏱️  Aligned {len(segment_durations)} visual scenes to spoken explanation sentences:")
+        for idx, dur in enumerate(segment_durations):
+            print(f"      Scene {idx+1} ({dur:.2f}s): '{keywords[idx]}'")
+    
+    # 5. Visual Media
+    print(f"🖼️  Step 3/4: Fetching {len(keywords)} detailed explanation visuals...")
     image_paths: List[Path] = []
     for i, kw in enumerate(keywords):
         img = get_visual_for_segment(kw, i)
         image_paths.append(img)
         print(f"   [{i+1}/{len(keywords)}] Keyword '{kw}' -> {img.name}")
         
-    # 5. FFmpeg Video Composition
-    print("🎥 Step 4/4: Assembling video, Ken Burns effects, and ducked audio...")
+    # 6. FFmpeg Video Composition
+    print("🎥 Step 4/4: Assembling video, Ken Burns effects, ducked audio, and sentence sync...")
     output_mp4 = OUTPUT_DIR / f"{script_id}.mp4"
     assemble_short_video(
         image_paths=image_paths,
@@ -96,7 +155,8 @@ def process_short(
         subtitle_ass_path=sub_path,
         output_mp4_path=output_mp4,
         total_duration=duration,
-        bg_music_path=bg_music
+        bg_music_path=bg_music,
+        segment_durations=segment_durations
     )
     
     # Save YouTube metadata companion file

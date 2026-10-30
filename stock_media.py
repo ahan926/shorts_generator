@@ -89,11 +89,46 @@ def fetch_pexels_video_scrape(keyword: str, output_path: Path) -> Optional[Path]
 
 USED_VIDEO_IDS = set()
 
+def reset_used_media():
+    """Resets the set of used video IDs for a new Short."""
+    USED_VIDEO_IDS.clear()
+
+def find_best_subject_match(videos: list, tokens: List[str], strict_primary: bool = True) -> Optional[dict]:
+    """
+    Selects the best matching video by prioritizing the primary subject noun first.
+    If strict_primary is True, ONLY matches tokens[0] (or its stem).
+    """
+    if not tokens or not videos:
+        return None
+        
+    # Primary subject token (e.g. 'flytrap', 'lightning', 'glacier')
+    p0 = tokens[0]
+    p0_stem = p0[:-1] if (p0.endswith('s') and len(p0) > 4 and not p0.endswith(('ss', 'us', 'is'))) else p0
+    for v in videos:
+        if v.get("id") in USED_VIDEO_IDS:
+            continue
+        slug = (v.get("url", "") + " " + v.get("image", "")).lower()
+        if p0 in slug or p0_stem in slug:
+            return v
+
+    # Fallback to secondary tokens only if strict_primary is False
+    if not strict_primary:
+        for t in tokens[1:3]:
+            t_stem = t[:-1] if (t.endswith('s') and len(t) > 4 and not t.endswith(('ss', 'us', 'is'))) else t
+            for v in videos:
+                if v.get("id") in USED_VIDEO_IDS:
+                    continue
+                slug = (v.get("url", "") + " " + v.get("image", "")).lower()
+                if t in slug or t_stem in slug:
+                    return v
+
+    return None
+
 def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
     """
     Searches and downloads a royalty-free stock video from Pexels.
     Strictly verifies that the primary subject appears in the video URL/metadata
-    to prevent off-topic videos (e.g. fish in an octopus video).
+    to prevent off-topic videos.
     """
     api_key = PEXELS_API_KEY or os.getenv("PEXELS_API_KEY", "")
     if api_key:
@@ -101,59 +136,44 @@ def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
             url = "https://api.pexels.com/videos/search"
             headers = {"Authorization": api_key, "User-Agent": "ShortsPipeline/1.0"}
             
-            # Identify core subject token (ignoring common modifiers)
+            # Identify core subject tokens (ignoring common modifiers)
             stop_words = {
                 "the", "and", "with", "from", "in", "on", "at", "for", "close", "up", "view",
                 "scene", "background", "macro", "video", "shot", "footage", "nature", "underwater",
                 "deep", "great", "african", "polar", "arctic", "antarctic", "majestic", "scenic",
                 "beautiful", "massive", "giant", "tiny", "huge", "wild", "yellowstone", "icelandic",
-                "planet", "super", "extreme", "colossal", "emperor", "hot", "cold", "vibrant"
+                "planet", "super", "extreme", "colossal", "emperor", "hot", "cold", "vibrant", "venus"
             }
             tokens = [w.lower() for w in keyword.split() if w.lower() not in stop_words and len(w) >= 3]
             primary_subject = tokens[0] if tokens else keyword.lower().split()[0]
-            # Singular stem if plural (e.g. penguins -> penguin, bears -> bear)
-            primary_stem = primary_subject[:-1] if (primary_subject.endswith('s') and len(primary_subject) > 4 and not primary_subject.endswith(('ss', 'us', 'is'))) else primary_subject
             
-            # 1. Search with portrait orientation first
+            # 1. Search with portrait orientation first for primary subject
             params = {"query": keyword, "orientation": "portrait", "per_page": 10}
             resp = requests.get(url, headers=headers, params=params, timeout=10)
             videos = resp.json().get("videos", []) if resp.status_code == 200 else []
-            
-            # Filter videos containing primary_subject in slug/image
-            matched_videos = []
-            for v in videos:
-                if v.get("id") in USED_VIDEO_IDS:
-                    continue
-                slug = (v.get("url", "") + " " + v.get("image", "")).lower()
-                if primary_subject in slug or primary_stem in slug:
-                    matched_videos.append(v)
+            chosen_video = find_best_subject_match(videos, tokens, strict_primary=True)
                     
-            # 2. If no subject match in portrait, search without orientation constraint
+            # 2. If no primary match in portrait, search without orientation constraint
             # (compositor automatically center-crops and scales widescreen video to 1080x1920)
-            if not matched_videos:
+            if not chosen_video:
                 params_any = {"query": keyword, "per_page": 12}
                 resp_any = requests.get(url, headers=headers, params=params_any, timeout=10)
                 if resp_any.status_code == 200:
-                    for v in resp_any.json().get("videos", []):
-                        if v.get("id") in USED_VIDEO_IDS:
-                            continue
-                        slug = (v.get("url", "") + " " + v.get("image", "")).lower()
-                        if primary_subject in slug or primary_stem in slug:
-                            matched_videos.append(v)
+                    chosen_video = find_best_subject_match(resp_any.json().get("videos", []), tokens, strict_primary=True)
                             
-            # 3. If still no subject match, query primary subject directly
-            if not matched_videos and len(tokens) > 1:
+            # 3. If still no primary match, query primary subject directly
+            if not chosen_video and tokens:
                 params_sub = {"query": primary_subject, "per_page": 12}
                 resp_sub = requests.get(url, headers=headers, params=params_sub, timeout=10)
                 if resp_sub.status_code == 200:
-                    for v in resp_sub.json().get("videos", []):
-                        if v.get("id") in USED_VIDEO_IDS:
-                            continue
-                        slug = (v.get("url", "") + " " + v.get("image", "")).lower()
-                        if primary_subject in slug or primary_stem in slug:
-                            matched_videos.append(v)
+                    chosen_video = find_best_subject_match(resp_sub.json().get("videos", []), tokens, strict_primary=True)
+
+            # 4. Secondary fallback only if primary subject had zero videos anywhere
+            if not chosen_video:
+                chosen_video = find_best_subject_match(videos, tokens, strict_primary=False)
                             
-            chosen_video = matched_videos[0] if matched_videos else (videos[0] if videos else None)
+            if not chosen_video and videos:
+                chosen_video = videos[0]
             if chosen_video:
                 USED_VIDEO_IDS.add(chosen_video.get("id"))
                 vid_url_slug = chosen_video.get("url", "")

@@ -35,6 +35,7 @@ def create_segment_clip(
     """
     ffmpeg_exe = get_ffmpeg_binary()
     output_clip_path.parent.mkdir(parents=True, exist_ok=True)
+    duration = max(1.0, float(duration))
     
     is_video = media_path.suffix.lower() in [".mp4", ".mov", ".webm", ".mkv"]
     
@@ -106,11 +107,12 @@ def assemble_short_video(
     subtitle_ass_path: Path,
     output_mp4_path: Path,
     total_duration: float,
-    bg_music_path: Optional[Path] = None
+    bg_music_path: Optional[Path] = None,
+    segment_durations: Optional[List[float]] = None
 ) -> Path:
     """
     Renders the final YouTube Short:
-    1. Cuts/animates images across total duration.
+    1. Cuts/animates images across total duration (sentence-aligned if segment_durations provided).
     2. Concatenates video segments.
     3. Burns ASS subtitles in the safe zone.
     4. Mixes voiceover audio with ducked background music.
@@ -124,14 +126,18 @@ def assemble_short_video(
     if num_images == 0:
         raise ValueError("No images provided for video generation.")
 
-    # Calculate duration per image (e.g. 4-6 seconds per image)
-    dur_per_img = total_duration / num_images
+    # Calculate duration per segment
+    if segment_durations and len(segment_durations) == num_images:
+        durations = segment_durations
+    else:
+        dur_per_img = total_duration / num_images
+        durations = [dur_per_img] * num_images
+
     segment_clips: List[Path] = []
-    
-    for i, img in enumerate(image_paths):
+    for i, (img, dur) in enumerate(zip(image_paths, durations)):
         clip_path = temp_dir / f"clip_{i:02d}.mp4"
         zoom_direction = (i % 2 == 0)
-        create_segment_clip(img, dur_per_img, clip_path, zoom_in=zoom_direction)
+        create_segment_clip(img, dur, clip_path, zoom_in=zoom_direction)
         segment_clips.append(clip_path)
 
     # Create concat list
