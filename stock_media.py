@@ -191,8 +191,12 @@ def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
                             chosen_file = vf
                             break
                 if not chosen_file and video_files:
-                    # Pick best available MP4 file
-                    mp4s = [f for f in video_files if f.get("file_type") == "video/mp4"]
+                    # Pick highest resolution available MP4 file (prefer crisp 1080p/4K)
+                    mp4s = sorted(
+                        [f for f in video_files if f.get("file_type") == "video/mp4"],
+                        key=lambda f: (f.get("width") or 0) * (f.get("height") or 0),
+                        reverse=True
+                    )
                     chosen_file = mp4s[0] if mp4s else video_files[0]
                     
                 if chosen_file and chosen_file.get("link"):
@@ -329,15 +333,17 @@ def get_visual_for_segment(keyword: str, segment_index: int) -> Path:
     
     # 1. Local Video
     for ext in [".mp4", ".mov", ".webm"]:
-        local_vid = VIDEOS_DIR / f"{keyword}{ext}"
-        if local_vid.exists():
-            return local_vid
+        for candidate in [keyword, clean_kw]:
+            local_vid = VIDEOS_DIR / f"{candidate}{ext}"
+            if local_vid.exists():
+                return local_vid
             
     # 2. Local Image
     for ext in [".jpg", ".png", ".jpeg", ".webp"]:
-        local_img = IMAGES_DIR / f"{keyword}{ext}"
-        if local_img.exists():
-            return local_img
+        for candidate in [keyword, clean_kw]:
+            local_img = IMAGES_DIR / f"{candidate}{ext}"
+            if local_img.exists():
+                return local_img
 
     # 3. Pexels Video
     if PREFER_STOCK_VIDEOS:
