@@ -107,8 +107,9 @@ def find_best_subject_match(videos: list, tokens: List[str], strict_primary: boo
     for v in videos:
         if v.get("id") in USED_VIDEO_IDS:
             continue
-        slug = (v.get("url", "") + " " + v.get("image", "")).lower()
-        if p0 in slug or p0_stem in slug:
+        # Strictly verify against the video title slug in the URL (avoid noisy image tag strings)
+        url_slug = v.get("url", "").lower()
+        if p0 in url_slug or p0_stem in url_slug:
             return v
 
     # Fallback to secondary tokens only if strict_primary is False
@@ -118,8 +119,8 @@ def find_best_subject_match(videos: list, tokens: List[str], strict_primary: boo
             for v in videos:
                 if v.get("id") in USED_VIDEO_IDS:
                     continue
-                slug = (v.get("url", "") + " " + v.get("image", "")).lower()
-                if t in slug or t_stem in slug:
+                url_slug = v.get("url", "").lower()
+                if t in url_slug or t_stem in url_slug:
                     return v
 
     return None
@@ -168,12 +169,10 @@ def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
                 if resp_sub.status_code == 200:
                     chosen_video = find_best_subject_match(resp_sub.json().get("videos", []), tokens, strict_primary=True)
 
-            # 4. Secondary fallback only if primary subject had zero videos anywhere
-            if not chosen_video:
-                chosen_video = find_best_subject_match(videos, tokens, strict_primary=False)
-                            
-            if not chosen_video and videos:
-                chosen_video = videos[0]
+            # 4. Strictly require a verified subject match - never fall back to an arbitrary video
+            if not chosen_video and not tokens:
+                if videos:
+                    chosen_video = videos[0]
             if chosen_video:
                 USED_VIDEO_IDS.add(chosen_video.get("id"))
                 vid_url_slug = chosen_video.get("url", "")
