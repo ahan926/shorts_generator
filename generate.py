@@ -77,6 +77,30 @@ def compute_sentence_durations(
         
     return None
 
+def load_words_from_ass(ass_path: Path) -> List[Dict[str, Any]]:
+    words = []
+    if not ass_path.exists():
+        return words
+    with open(ass_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("Dialogue:"):
+                parts = line.split(",", 9)
+                if len(parts) >= 10:
+                    start_str, end_str, text_part = parts[1], parts[2], parts[9]
+                    h, m, s = start_str.split(":")
+                    start_sec = int(h)*3600 + int(m)*60 + float(s)
+                    h, m, s = end_str.split(":")
+                    end_sec = int(h)*3600 + int(m)*60 + float(s)
+                    m_word = re.search(r'\\c&H0000FFFF[^\}]*\}([A-Za-z0-9\']+)[\{\s]', text_part)
+                    if m_word:
+                        words.append({
+                            "word": m_word.group(1),
+                            "start": start_sec,
+                            "end": end_sec,
+                            "duration": end_sec - start_sec
+                        })
+    return words
+
 def ensure_background_music() -> Path:
     """Ensures a royalty-free ambient background audio file exists."""
     music_files = list(MUSIC_DIR.glob("*.mp3")) + list(MUSIC_DIR.glob("*.wav"))
@@ -121,15 +145,45 @@ def process_short(
     bg_music = ensure_background_music()
     
     # 2. Text to Speech
-    print("🗣️  Step 1/4: Synthesizing voiceover with Edge-TTS...")
     audio_path = work_dir / "voiceover.mp3"
-    _, words, duration = generate_voiceover(text, audio_path, voice=voice)
-    print(f"   Audio generated: {duration:.1f}s ({len(words)} words)")
+    words_path = work_dir / "words.json"
+    sub_path = work_dir / "subtitles.ass"
+    
+    words = []
+    duration = 0.0
+    if audio_path.exists() and words_path.exists():
+        try:
+            import json
+            with open(words_path, "r", encoding="utf-8") as f:
+                words = json.load(f)
+            duration = words[-1]["end"] + 0.4 if words else 0.0
+            print(f"🗣️  Step 1/4: Using cached voiceover: {duration:.1f}s ({len(words)} words)")
+        except Exception:
+            words = []
+            
+    if not words and audio_path.exists() and sub_path.exists():
+        words = load_words_from_ass(sub_path)
+        if words:
+            duration = words[-1]["end"] + 0.4
+            import json
+            with open(words_path, "w", encoding="utf-8") as f:
+                json.dump(words, f, indent=2)
+            print(f"🗣️  Step 1/4: Loaded cached voiceover & subtitles: {duration:.1f}s ({len(words)} words)")
+            
+    if not words:
+        print("🗣️  Step 1/4: Synthesizing voiceover with Edge-TTS...")
+        _, words, duration = generate_voiceover(text, audio_path, voice=voice)
+        print(f"   Audio generated: {duration:.1f}s ({len(words)} words)")
+        import json
+        with open(words_path, "w", encoding="utf-8") as f:
+            json.dump(words, f, indent=2)
     
     # 3. Subtitles
-    print("📝 Step 2/4: Generating dynamic karaoke ASS subtitles...")
-    sub_path = work_dir / "subtitles.ass"
-    generate_ass_subtitles(words, sub_path, words_per_phrase=3)
+    if not sub_path.exists():
+        print("📝 Step 2/4: Generating dynamic karaoke ASS subtitles...")
+        generate_ass_subtitles(words, sub_path, words_per_phrase=3)
+    else:
+        print("📝 Step 2/4: Using existing dynamic karaoke ASS subtitles...")
     
     # 4. Sentence-Aligned Segment Durations
     segment_durations = compute_sentence_durations(text, words, duration, expected_segments=len(keywords))
