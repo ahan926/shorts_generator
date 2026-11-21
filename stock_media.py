@@ -89,6 +89,15 @@ def fetch_pexels_video_scrape(keyword: str, output_path: Path) -> Optional[Path]
 
 USED_VIDEO_IDS = set()
 
+CORE_SUBJECT_PRIORITY = {
+    "ant", "ants", "fish", "fishes", "crocodile", "crocodiles", "alligator",
+    "eel", "eels", "frog", "frogs", "otter", "otters", "snake", "snakes", "viper",
+    "spider", "spiders", "butterfly", "butterflies", "owl", "owls", "woodpecker",
+    "hummingbird", "chameleon", "jellyfish", "whale", "whales", "lion", "lions",
+    "cheetah", "cheetahs", "crow", "crows", "raven", "octopus", "squid", "shark",
+    "bear", "geyser", "volcano", "glacier", "lightning", "tornado", "flytrap"
+}
+
 def reset_used_media():
     """Resets the set of used video IDs for a new Short."""
     USED_VIDEO_IDS.clear()
@@ -101,8 +110,10 @@ def find_best_subject_match(videos: list, tokens: List[str], strict_primary: boo
     if not tokens or not videos:
         return None
         
-    # Primary subject token (e.g. 'flytrap', 'lightning', 'glacier')
-    p0 = tokens[0]
+    # Re-order tokens if a known core subject noun is present
+    core_tokens = [t for t in tokens if t in CORE_SUBJECT_PRIORITY]
+    effective_tokens = core_tokens + [t for t in tokens if t not in CORE_SUBJECT_PRIORITY]
+    p0 = effective_tokens[0]
     p0_stem = p0[:-1] if (p0.endswith('s') and len(p0) > 4 and not p0.endswith(('ss', 'us', 'is'))) else p0
     for v in videos:
         if v.get("id") in USED_VIDEO_IDS:
@@ -114,7 +125,7 @@ def find_best_subject_match(videos: list, tokens: List[str], strict_primary: boo
 
     # Fallback to secondary tokens only if strict_primary is False
     if not strict_primary:
-        for t in tokens[1:3]:
+        for t in effective_tokens[1:3]:
             t_stem = t[:-1] if (t.endswith('s') and len(t) > 4 and not t.endswith(('ss', 'us', 'is'))) else t
             for v in videos:
                 if v.get("id") in USED_VIDEO_IDS:
@@ -137,13 +148,21 @@ def fetch_pexels_video(keyword: str, output_path: Path) -> Optional[Path]:
             url = "https://api.pexels.com/videos/search"
             headers = {"Authorization": api_key, "User-Agent": "ShortsPipeline/1.0"}
             
-            # Identify core subject tokens (ignoring common modifiers)
+            # Identify core subject tokens (ignoring common modifiers, colors, and habitats)
             stop_words = {
                 "the", "and", "with", "from", "in", "on", "at", "for", "close", "up", "view",
                 "scene", "background", "macro", "video", "shot", "footage", "nature", "underwater",
                 "deep", "great", "african", "polar", "arctic", "antarctic", "majestic", "scenic",
                 "beautiful", "massive", "giant", "tiny", "huge", "wild", "yellowstone", "icelandic",
-                "planet", "super", "extreme", "colossal", "emperor", "hot", "cold", "vibrant", "venus"
+                "planet", "super", "extreme", "colossal", "emperor", "hot", "cold", "vibrant", "venus",
+                "green", "blue", "red", "yellow", "black", "white", "golden", "dark", "light",
+                "bright", "orange", "purple", "brown", "grey", "gray", "tree", "branch", "leaf",
+                "leaves", "plant", "forest", "wood", "water", "sea", "ocean", "river", "pond",
+                "rock", "ground", "swimming", "resting", "moving", "crawling", "flying", "perched",
+                "walking", "sitting", "looking", "feeding", "eating", "exploration", "habitat",
+                "weaver", "tropical", "circling", "saltwater", "freshwater", "aquatic", "marine",
+                "wildlife", "animal", "creature", "serene", "playful", "slithering", "gliding",
+                "relaxing", "calm", "fast", "slow", "stealth", "jumping"
             }
             tokens = [w.lower() for w in keyword.split() if w.lower() not in stop_words and len(w) >= 3]
             primary_subject = tokens[0] if tokens else keyword.lower().split()[0]
