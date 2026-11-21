@@ -1,0 +1,1043 @@
+"""
+High-End Realistic Cartoon Animation Engine
+100% Procedural Vector Animation — Zero Static Images.
+Draws organic cel-shaded anatomical illustrations with smooth Bezier curves,
+multi-tone lighting, articulated skeletal hinges, dynamic fluid/particle physics,
+and high-tech scientific HUD telemetry.
+"""
+
+import math
+import os
+import subprocess
+import cv2
+import imageio_ffmpeg
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+WIDTH = 1080
+HEIGHT = 1920
+FPS = 30
+OUTPUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "videos")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ==============================================================================
+# Vector Math & Easing Helpers
+# ==============================================================================
+def clamp(v, min_v=0.0, max_v=1.0):
+    return max(min_v, min(max_v, float(v)))
+
+def ease_in_out(t):
+    t = clamp(t)
+    return t * t * (3.0 - 2.0 * t)
+
+def ease_out_quad(t):
+    t = clamp(t)
+    return 1.0 - (1.0 - t) * (1.0 - t)
+
+def ease_in_quad(t):
+    t = clamp(t)
+    return t * t
+
+def lerp(a, b, t):
+    return a + (b - a) * t
+
+def lerp_pt(p1, p2, t):
+    return (int(lerp(p1[0], p2[0], t)), int(lerp(p1[1], p2[1], t)))
+
+def rotate_pt(pt, origin, angle_rad):
+    ox, oy = origin
+    px, py = pt
+    qx = ox + math.cos(angle_rad) * (px - ox) - math.sin(angle_rad) * (py - oy)
+    qy = oy + math.sin(angle_rad) * (px - ox) + math.cos(angle_rad) * (py - oy)
+    return (int(qx), int(qy))
+
+def bezier_curve(p0, p1, p2, p3, steps=25):
+    pts = []
+    for t in np.linspace(0, 1, steps):
+        x = (1-t)**3 * p0[0] + 3*(1-t)**2*t * p1[0] + 3*(1-t)*t**2 * p2[0] + t**3 * p3[0]
+        y = (1-t)**3 * p0[1] + 3*(1-t)**2*t * p1[1] + 3*(1-t)*t**2 * p2[1] + t**3 * p3[1]
+        pts.append((int(x), int(y)))
+    return pts
+
+def get_font(size=36, bold=True):
+    try:
+        font_path = "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf"
+        return ImageFont.truetype(font_path, size)
+    except Exception:
+        return ImageFont.load_default()
+
+def draw_hud(draw, x, y, title, subtitle="", badge="", color=(255, 215, 0), bg=(12, 18, 28, 240)):
+    font_title = get_font(34, bold=True)
+    font_sub = get_font(26, bold=False)
+    font_badge = get_font(22, bold=True)
+    
+    pad_x, pad_y = 32, 18
+    bbox_t = draw.textbbox((0, 0), title, font=font_title)
+    w_t = bbox_t[2] - bbox_t[0]
+    h_t = bbox_t[3] - bbox_t[1]
+    
+    w_s, h_s = 0, 0
+    if subtitle:
+        bbox_s = draw.textbbox((0, 0), subtitle, font=font_sub)
+        w_s = bbox_s[2] - bbox_s[0]
+        h_s = bbox_s[3] - bbox_s[1] + 10
+        
+    badge_w = max(w_t, w_s) + pad_x * 2
+    badge_h = h_t + h_s + pad_y * 2
+    bx = x - badge_w // 2
+    by = y - badge_h // 2
+    
+    # Outer glow & card
+    draw.rounded_rectangle([bx - 3, by - 3, bx + badge_w + 3, by + badge_h + 3], radius=18, outline=(color[0]//2, color[1]//2, color[2]//2, 100), width=4)
+    draw.rounded_rectangle([bx, by, bx + badge_w, by + badge_h], radius=16, fill=bg, outline=color, width=3)
+    
+    # Text
+    draw.text((bx + (badge_w - w_t) // 2, by + pad_y), title, font=font_title, fill=color)
+    if subtitle:
+        draw.text((bx + (badge_w - w_s) // 2, by + pad_y + h_t + 8), subtitle, font=font_sub, fill=(225, 235, 245))
+
+def draw_coiled_spring(draw, p1, p2, coils=8, radius=42, color=(255, 215, 50), width=10):
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    dist = math.hypot(dx, dy)
+    if dist < 1e-3: return
+    ux, uy = dx / dist, dy / dist
+    nx, ny = -uy, ux
+    
+    steps = coils * 24
+    pts = []
+    for i in range(steps + 1):
+        t = i / steps
+        along = dist * t
+        phase = t * coils * 2 * math.pi
+        lateral = math.sin(phase) * radius
+        px = p1[0] + ux * along + nx * lateral
+        py = p1[1] + uy * along + ny * lateral
+        pts.append((int(px), int(py)))
+        
+    # Spring shadow
+    for i in range(len(pts) - 1):
+        draw.line([(pts[i][0] + 3, pts[i][1] + 3), (pts[i+1][0] + 3, pts[i+1][1] + 3)],
+                  fill=(140, 100, 20), width=width + 2)
+    # Core spring coil
+    for i in range(len(pts) - 1):
+        draw.line([pts[i], pts[i+1]], fill=color, width=width)
+    # Specular highlights
+    for i in range(len(pts) - 1):
+        if i % 6 in [1, 2]:
+            draw.line([(pts[i][0] - 2, pts[i][1] - 2), (pts[i+1][0] - 2, pts[i+1][1] - 2)],
+                      fill=(255, 255, 220), width=max(2, width // 3))
+
+def save_mp4(frames, filename, fps=FPS):
+    out_path = os.path.join(OUTPUT_DIR, filename)
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    
+    cmd = [
+        ffmpeg_exe, "-y",
+        "-f", "rawvideo",
+        "-vcodec", "rawvideo",
+        "-s", f"{WIDTH}x{HEIGHT}",
+        "-pix_fmt", "bgr24",
+        "-r", str(fps),
+        "-i", "-",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-pix_fmt", "yuv420p",
+        "-crf", "18",
+        out_path
+    ]
+    
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    for f in frames:
+        if not f.flags["C_CONTIGUOUS"]:
+            f = np.ascontiguousarray(f, dtype=np.uint8)
+        proc.stdin.write(f.tobytes())
+    proc.stdin.close()
+    proc.wait()
+    print(f"✅ Generated sequence: {filename} ({len(frames)} frames, {len(frames)/fps:.1f}s)", flush=True)
+    return out_path
+
+
+# ==============================================================================
+# 1 & 2: TREE FROG ELASTIC CATAPULT ANIMATIONS
+# ==============================================================================
+def render_frog_muscle_compression(num_frames=240):
+    frames = []
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (14, 20, 28, 255))
+        draw = ImageDraw.Draw(img)
+        
+        # Atmospheric ambient glow
+        draw.ellipse([WIDTH//2 - 500, HEIGHT//2 - 500, WIDTH//2 + 500, HEIGHT//2 + 500], fill=(22, 34, 46, 255))
+        
+        # Mouth Opening Animation (0° -> 32°)
+        gape_t = ease_in_out(min(1.0, t * 2.2))
+        jaw_angle = lerp(0.0, 32.0, gape_t)
+        jaw_rad = math.radians(jaw_angle)
+        
+        pivot = (320, 920)
+        
+        # Upper Head (Organic Bezier Contours)
+        # Snout, brow, cranial dome, neck
+        cranial_pts = []
+        cranial_pts.extend(bezier_curve((140, 920), (140, 680), (320, 580), (480, 580), steps=20))
+        cranial_pts.extend(bezier_curve((480, 580), (620, 580), (760, 680), (840, 840), steps=20))
+        cranial_pts.extend(bezier_curve((840, 840), (870, 900), (870, 920), (840, 920), steps=10))
+        cranial_pts.append(pivot)
+        cranial_pts.append((140, 920))
+        
+        draw.polygon(cranial_pts, fill=(54, 138, 72), outline=(22, 65, 34), width=8)
+        
+        # Cel-shaded top highlight on head
+        hi_pts = bezier_curve((220, 660), (350, 600), (520, 600), (680, 670), steps=20)
+        for i in range(len(hi_pts) - 1):
+            draw.line([hi_pts[i], hi_pts[i+1]], fill=(105, 205, 125), width=8)
+            
+        # Tympanum (ear disc)
+        draw.ellipse([340, 720, 430, 810], fill=(85, 120, 65), outline=(32, 60, 25), width=5)
+        draw.ellipse([365, 745, 405, 785], fill=(50, 85, 40))
+        
+        # Golden Eyeball with Specular Glints
+        eye_cx, eye_cy = 540, 640
+        draw.ellipse([eye_cx - 85, eye_cy - 85, eye_cx + 85, eye_cy + 85], fill=(245, 195, 40), outline=(25, 20, 10), width=8)
+        # Horizontal slit pupil
+        draw.ellipse([eye_cx - 55, eye_cy - 20, eye_cx + 55, eye_cy + 20], fill=(15, 10, 5))
+        # Specular glint
+        draw.ellipse([eye_cx - 40, eye_cy - 55, eye_cx - 15, eye_cy - 30], fill=(255, 255, 255))
+        draw.ellipse([eye_cx + 20, eye_cy - 35, eye_cx + 35, eye_cy - 20], fill=(255, 255, 255))
+        
+        # Lower Jaw (Hinged Articulating Bone)
+        low_base = [(pivot[0], pivot[1]), (pivot[0] + 520, pivot[1]), (pivot[0] + 480, pivot[1] + 110), (pivot[0] - 60, pivot[1] + 160)]
+        low_rotated = [rotate_pt(p, pivot, jaw_rad) for p in low_base]
+        draw.polygon(low_rotated, fill=(68, 155, 84), outline=(22, 65, 34), width=8)
+        
+        # Oral Cavity Interior (Fleshy red-pink mucosa)
+        oral_pts = [pivot, (pivot[0] + 500, pivot[1]), low_rotated[1]]
+        draw.polygon(oral_pts, fill=(150, 42, 62), outline=(75, 16, 26), width=6)
+        
+        # Hyoglossus Contractor Muscle Spindle (Bulging and contracting)
+        compress_t = ease_in_out(clamp((t - 0.25) / 0.50))
+        m_start = (pivot[0] + 40, pivot[1] + 20)
+        m_len = int(lerp(380, 170, compress_t))
+        m_thick = int(lerp(45, 120, compress_t))
+        m_end = (m_start[0] + m_len, m_start[1])
+        
+        # Muscle belly with shadow
+        draw.ellipse([m_start[0], m_start[1] - m_thick//2, m_end[0], m_start[1] + m_thick//2],
+                     fill=(215, 38, 62), outline=(110, 16, 28), width=6)
+        # Striated muscle fibers
+        for s in range(7):
+            sx = int(m_start[0] + m_len * (s + 1) / 8)
+            draw.line([(sx, m_start[1] - m_thick//2 + 10), (sx, m_start[1] + m_thick//2 - 10)],
+                      fill=(255, 115, 135), width=5)
+                      
+        # Tendon connection
+        draw.line([m_start, (pivot[0], pivot[1] + 20)], fill=(235, 225, 205), width=12)
+        
+        # Coiled Collagen Spring (Gold spring compressing coil-by-coil)
+        spring_start = m_end
+        spring_end = (low_rotated[1][0] - 40, low_rotated[1][1] - 30)
+        spring_rad = int(lerp(32, 54, compress_t))
+        draw_coiled_spring(draw, spring_start, spring_end, coils=7, radius=spring_rad, color=(255, 215, 50), width=10)
+        
+        # Dynamic Latch Energy & Tension Vectors
+        if compress_t > 0.6:
+            pulse = math.sin(fi * 0.8) * 16
+            draw.ellipse([spring_end[0] - 50 - int(pulse), spring_end[1] - 50 - int(pulse),
+                          spring_end[0] + 50 + int(pulse), spring_end[1] + 50 + int(pulse)],
+                         outline=(255, 245, 110, 220), width=5)
+            # Arrow indicating compression force
+            draw.line([(m_end[0] + 50, m_start[1] - 90), (m_end[0] - 30, m_start[1] - 90)], fill=(255, 90, 90), width=7)
+            draw.polygon([(m_end[0] - 40, m_start[1] - 90), (m_end[0] - 20, m_start[1] - 105), (m_end[0] - 20, m_start[1] - 75)], fill=(255, 90, 90))
+            
+        draw_hud(draw, 540, 320, "HYOGLOSSUS CONTRACTOR MUSCLE", "Contracts backward to winch the coiled collagen spring", color=(255, 100, 120))
+        draw_hud(draw, 540, 1600, f"STORED ELASTIC POTENTIAL: {int(compress_t*50):02d}G FORCE",
+                 "Mechanical catapult cocked for supersonic release", color=(255, 215, 0))
+                 
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "frog_elastic_muscle_energy_storage.mp4")
+
+def render_frog_tongue_launch(num_frames=270):
+    frames = []
+    fly_base_x = 920
+    fly_base_y = 900
+    
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (14, 20, 28, 255))
+        draw = ImageDraw.Draw(img)
+        draw.ellipse([WIDTH//2 - 500, HEIGHT//2 - 500, WIDTH//2 + 500, HEIGHT//2 + 500], fill=(22, 34, 46, 255))
+        
+        mouth_pt = (360, 920)
+        fly_x, fly_y = fly_base_x, fly_base_y
+        
+        # Organic Frog Profile on Left
+        frog_body = []
+        frog_body.extend(bezier_curve((60, 1050), (60, 780), (180, 720), (320, 760), steps=15))
+        frog_body.extend(bezier_curve((320, 760), (400, 830), (410, 920), (360, 940), steps=15))
+        frog_body.extend(bezier_curve((360, 940), (340, 1120), (220, 1180), (80, 1150), steps=15))
+        draw.polygon(frog_body, fill=(54, 138, 72), outline=(22, 65, 34), width=8)
+        
+        # Frog Eye
+        draw.ellipse([200, 710, 280, 790], fill=(245, 195, 40), outline=(25, 20, 10), width=6)
+        draw.ellipse([225, 735, 255, 765], fill=(15, 10, 5))
+        draw.ellipse([215, 725, 230, 740], fill=(255, 255, 255))
+        
+        # Mossy Twig on Right
+        draw.line([(fly_base_x - 120, fly_base_y + 110), (WIDTH, fly_base_y + 140)], fill=(105, 78, 52), width=26)
+        # Leaf
+        leaf_pts = bezier_curve((fly_base_x - 80, fly_base_y + 110), (fly_base_x - 10, fly_base_y + 60),
+                                (fly_base_x + 80, fly_base_y + 80), (fly_base_x + 120, fly_base_y + 120), steps=15)
+        leaf_pts.extend(bezier_curve((fly_base_x + 120, fly_base_y + 120), (fly_base_x + 40, fly_base_y + 150),
+                                     (fly_base_x - 40, fly_base_y + 140), (fly_base_x - 80, fly_base_y + 110), steps=15))
+        draw.polygon(leaf_pts, fill=(62, 145, 68), outline=(28, 70, 32), width=4)
+        
+        # Launch Timeline
+        if t < 0.20:
+            tongue_tip = mouth_pt
+        elif t < 0.42:
+            launch_t = ease_out_quad((t - 0.20) / 0.22)
+            tongue_tip = lerp_pt(mouth_pt, (fly_base_x - 30, fly_base_y), launch_t)
+        elif t < 0.65:
+            tongue_tip = (fly_base_x - 10, fly_base_y)
+        else:
+            retract_t = ease_in_quad((t - 0.65) / 0.35)
+            tongue_tip = lerp_pt((fly_base_x - 10, fly_base_y), mouth_pt, retract_t)
+            fly_x = tongue_tip[0] + 25
+            fly_y = tongue_tip[1]
+            
+        # Draw Elastic Tongue Ribbon (Muscular fleshy texture)
+        if tongue_tip != mouth_pt:
+            draw.line([mouth_pt, tongue_tip], fill=(235, 75, 105), width=38)
+            draw.line([mouth_pt, tongue_tip], fill=(255, 145, 165), width=16)
+            # Inverted mushroom pad
+            draw.ellipse([tongue_tip[0] - 34, tongue_tip[1] - 44, tongue_tip[0] + 44, tongue_tip[1] + 44],
+                         fill=(255, 115, 148), outline=(180, 30, 60), width=6)
+                         
+        # Cartoon Insect (Fly with animated flapping wings)
+        draw.ellipse([fly_x - 26, fly_y - 18, fly_x + 26, fly_y + 18], fill=(38, 42, 50), outline=(12, 14, 18), width=3)
+        # Red compound eye
+        draw.ellipse([fly_x - 24, fly_y - 14, fly_x - 12, fly_y], fill=(210, 45, 45))
+        if t < 0.42:
+            w_flap = math.sin(fi * 2.2) * 18
+            w_top = min(fly_y - 32 + w_flap, fly_y - 10)
+            w_bot = max(fly_y - 32 + w_flap, fly_y - 6)
+            draw.ellipse([fly_x - 16, int(w_top), fly_x + 14, int(w_bot)], fill=(210, 235, 255, 190))
+            
+        # Impact Waves & Viscoelastic Saliva Strands
+        if 0.40 <= t <= 0.68:
+            shock_r = int((t - 0.40) * 550)
+            draw.ellipse([fly_base_x - shock_r, fly_base_y - shock_r, fly_base_x + shock_r, fly_base_y + shock_r],
+                         outline=(255, 235, 100, max(0, 255 - shock_r * 2)), width=6)
+            for dy in [-20, 0, 20]:
+                draw.line([(tongue_tip[0] + 18, tongue_tip[1] + dy), (fly_x, fly_y + dy)], fill=(245, 245, 190), width=8)
+                
+        draw_hud(draw, 540, 320, "50-G CATAPULT STRIKE & RECOIL", "Releases in 7ms — mushroom pad inverts upon impact", color=(255, 80, 100))
+        if t < 0.42:
+            draw_hud(draw, 540, 1600, "ELASTIC SPRING RELEASE: 50G ACCELERATION", color=(255, 215, 0))
+        else:
+            draw_hud(draw, 540, 1600, "SHEAR-THINNING SALIVA: INSTANT SOLID ADHESION", color=(100, 240, 255))
+            
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "frog_tongue_slingshot_impact_adhesion.mp4")
+
+
+# ==============================================================================
+# 3 & 4: SEA OTTER PELT & THERMAL DRYSUIT ANIMATIONS
+# ==============================================================================
+def render_otter_fur_density(num_frames=255):
+    frames = []
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (16, 26, 40, 255))
+        draw = ImageDraw.Draw(img)
+        
+        # Skin Layer at Bottom (Epidermis, Dermis & Follicles)
+        draw.rectangle([0, 1380, WIDTH, HEIGHT], fill=(235, 160, 150), outline=(180, 100, 90), width=6)
+        draw.text((WIDTH//2 - 160, 1420), "EPIDERMIS SKIN LAYER", font=get_font(32, bold=True), fill=(140, 60, 50))
+        
+        # Dense Underfur Shafts
+        hair_count = 38
+        interlock_t = ease_in_out(clamp((t - 0.30) / 0.50))
+        
+        for i in range(hair_count):
+            hx = int(50 + i * (WIDTH - 100) / (hair_count - 1))
+            wave = math.sin(fi * 0.15 + i * 0.35) * 14
+            top_x = hx + int(wave + (30 if i % 2 == 0 else -30) * interlock_t)
+            top_y = 660 + (i % 3) * 35
+            
+            # Shaded hair shaft
+            draw.line([(hx, 1380), (top_x, top_y)], fill=(110, 75, 45), width=10)
+            draw.line([(hx, 1380), (top_x, top_y)], fill=(175, 130, 90), width=4)
+            
+            # Microscopic Interlocking Barbs
+            if interlock_t > 0.1:
+                barb_alpha = int(interlock_t * 255)
+                for by in range(top_y + 80, 1300, 70):
+                    bx = int(lerp(hx, top_x, (1380 - by) / (1380 - top_y)))
+                    draw.line([(bx, by), (bx + 20, by - 16)], fill=(220, 180, 135, barb_alpha), width=4)
+                    draw.line([(bx, by), (bx - 20, by - 16)], fill=(220, 180, 135, barb_alpha), width=4)
+                    
+        # Microscopic Zoom Lens Inset
+        zoom_cx, zoom_cy = 540, 480
+        draw.ellipse([zoom_cx - 240, zoom_cy - 240, zoom_cx + 240, zoom_cy + 240],
+                     fill=(24, 38, 55, 245), outline=(255, 215, 80), width=8)
+        # Zipper interlocking action inside lens
+        z_t = ease_in_out(clamp((t - 0.35) / 0.50))
+        d_hook = lerp(80, 0, z_t)
+        # Left barbed fiber
+        draw.line([(zoom_cx - 100 + int(d_hook), zoom_cy - 80), (zoom_cx - 20, zoom_cy)], fill=(225, 175, 125), width=18)
+        draw.line([(zoom_cx - 20, zoom_cy), (zoom_cx - 70, zoom_cy + 40)], fill=(225, 175, 125), width=18)
+        # Right barbed fiber
+        draw.line([(zoom_cx + 100 - int(d_hook), zoom_cy + 80), (zoom_cx + 20, zoom_cy)], fill=(185, 135, 95), width=18)
+        draw.line([(zoom_cx + 20, zoom_cy), (zoom_cx + 70, zoom_cy - 40)], fill=(185, 135, 95), width=18)
+        
+        # Digital Counter
+        density_num = int(lerp(100000, 1000000, ease_out_quad(min(1.0, t * 1.6))))
+        draw_hud(draw, 540, 200, "MICROSCOPIC INTERLOCKING BARBS", "Barbed underfur fibers mechanically zip into an airtight shield", color=(100, 230, 255))
+        draw_hud(draw, 540, 1540, f"FUR DENSITY: {density_num:,} HAIRS / IN²",
+                 "Densest pelt in the entire animal kingdom", color=(255, 215, 0))
+                 
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "otter_fur_density_interlocking_barbs.mp4")
+
+def render_otter_air_bubble_barrier(num_frames=270):
+    frames = []
+    np.random.seed(42)
+    bubbles = [{"x": np.random.randint(120, 960), "y": np.random.randint(920, 1280), "r": np.random.randint(14, 32), "drift": np.random.uniform(0.5, 2.0)} for _ in range(55)]
+    
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (12, 28, 48, 255))
+        draw = ImageDraw.Draw(img)
+        
+        # Upper Freezing Ocean Water
+        water_press_y = int(lerp(480, 840, ease_in_out(clamp((t - 0.25) / 0.50))))
+        draw.rectangle([0, 0, WIDTH, water_press_y], fill=(20, 58, 98, 255))
+        
+        # Floating Ice Crystals in Ocean
+        for ix in range(80, WIDTH - 80, 120):
+            iy = (ix * 3 + fi * 4) % (water_press_y - 40)
+            draw.polygon([(ix, iy - 16), (ix + 14, iy), (ix, iy + 16), (ix - 14, iy)], fill=(185, 235, 255, 170))
+            
+        # Dense Interlocked Fur Coat
+        draw.rectangle([0, water_press_y, WIDTH, 1420], fill=(78, 52, 38, 255))
+        for h in range(44):
+            hx = h * 25
+            draw.line([(hx, 1420), (hx + int(math.sin(fi * 0.1 + h) * 10), water_press_y)], fill=(135, 95, 65), width=6)
+            
+        # Trapped Silvery Air Bubbles Cushion
+        for b in bubbles:
+            by = int(b["y"] + math.sin(fi * 0.12 + b["drift"]) * 8)
+            bx = int(b["x"] + math.cos(fi * 0.09 + b["drift"]) * 6)
+            if by > water_press_y + 15 and by < 1400:
+                draw.ellipse([bx - b["r"], by - b["r"], bx + b["r"], by + b["r"]],
+                             fill=(215, 245, 255, 200), outline=(255, 255, 255, 245), width=3)
+                draw.ellipse([bx - b["r"]//2, by - b["r"]//2, bx - b["r"]//4, by - b["r"]//4], fill=(255, 255, 255, 255))
+                
+        # Lower Pink Skin Layer (Warm & 100% Dry)
+        draw.rectangle([0, 1420, WIDTH, HEIGHT], fill=(240, 168, 155))
+        draw.text((WIDTH//2 - 140, 1470), "WARM SKIN: 37°C", font=get_font(34, bold=True), fill=(160, 50, 40))
+        draw.text((WIDTH//2 - 110, 1520), "100% DRY", font=get_font(28, bold=True), fill=(30, 145, 50))
+        
+        # Deflection boundary sheen
+        draw.line([(0, water_press_y), (WIDTH, water_press_y)], fill=(120, 220, 255), width=8)
+        
+        draw_hud(draw, 540, 320, "FREEZING ARCTIC WATER: 0°C", "Repelled by surface tension of captive bubble layer", color=(120, 225, 255))
+        draw_hud(draw, 540, 1680, "CAPTIVE AIR BUBBLE THERMAL DRYSUIT", "Zero body blubber needed — skin never gets wet", color=(255, 215, 0))
+        
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "otter_air_bubble_thermal_barrier.mp4")
+
+
+# ==============================================================================
+# 5 & 6: TRAP-JAW ANT SPRING MANDIBLE ANIMATIONS
+# ==============================================================================
+def render_ant_muscle_latch(num_frames=255):
+    frames = []
+    cx, cy = 540, 1100
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (18, 16, 22, 255))
+        draw = ImageDraw.Draw(img)
+        
+        # Head Capsule Dorsal Anatomy (Smooth curved chitin shell)
+        head_pts = []
+        head_pts.extend(bezier_curve((cx - 280, cy - 140), (cx - 320, cy + 60), (cx - 300, cy + 240), (cx, cy + 260), steps=20))
+        head_pts.extend(bezier_curve((cx, cy + 260), (cx + 300, cy + 240), (cx + 320, cy + 60), (cx + 280, cy - 140), steps=20))
+        head_pts.extend(bezier_curve((cx + 280, cy - 140), (cx + 180, cy - 180), (cx - 180, cy - 180), (cx - 280, cy - 140), steps=20))
+        draw.polygon(head_pts, fill=(58, 42, 38), outline=(135, 95, 75), width=8)
+        
+        # Compound Eyes on Head Margins
+        draw.ellipse([cx - 330, cy + 20, cx - 270, cy + 120], fill=(22, 18, 24), outline=(150, 100, 80), width=4)
+        draw.ellipse([cx + 270, cy + 20, cx + 330, cy + 120], fill=(22, 18, 24), outline=(150, 100, 80), width=4)
+        
+        # Mandible Opening: 35° -> 90° (each side), total spread 70° -> 180° flat
+        open_t = ease_in_out(clamp((t - 0.20) / 0.60))
+        angle_deg = lerp(35, 90, open_t)
+        rad = math.radians(angle_deg)
+        
+        m_len = 410
+        lm_base = (cx - 140, cy - 160)
+        rm_base = (cx + 140, cy - 160)
+        lm_tip = (int(lm_base[0] - m_len * math.sin(rad)), int(lm_base[1] - m_len * math.cos(rad)))
+        rm_tip = (int(rm_base[0] + m_len * math.sin(rad)), int(rm_base[1] - m_len * math.cos(rad)))
+        
+        # Curved Mandibles with Serrated Teeth
+        draw.line([lm_base, lm_tip], fill=(165, 80, 50), width=32)
+        draw.line([rm_base, rm_tip], fill=(165, 80, 50), width=32)
+        draw.line([lm_base, lm_tip], fill=(235, 140, 90), width=14)
+        draw.line([rm_base, rm_tip], fill=(235, 140, 90), width=14)
+        
+        # Closer Muscle Swelling & Striations
+        m_thick = int(lerp(48, 120, open_t))
+        draw.ellipse([cx - 240, cy - 80, cx - 30, cy - 80 + m_thick * 2], fill=(210, 48, 70), outline=(130, 22, 35), width=6)
+        draw.ellipse([cx + 30, cy - 80, cx + 240, cy - 80 + m_thick * 2], fill=(210, 48, 70), outline=(130, 22, 35), width=6)
+        for s in range(5):
+            sy = cy - 60 + s * int(m_thick * 0.35)
+            draw.line([(cx - 210, sy), (cx - 60, sy)], fill=(255, 110, 130), width=4)
+            draw.line([(cx + 60, sy), (cx + 210, sy)], fill=(255, 110, 130), width=4)
+            
+        # Central Latch Mechanism (Engages gold when 180° reached)
+        latch_color = (255, 215, 0) if open_t > 0.9 else (180, 180, 180)
+        draw.rectangle([cx - 40, cy - 190, cx + 40, cy - 100], fill=latch_color, outline=(40, 40, 40), width=5)
+        
+        # Trigger Hairs extending forward
+        draw.line([(cx - 40, cy - 180), (cx - 75, cy - 360)], fill=(245, 245, 245), width=5)
+        draw.line([(cx + 40, cy - 180), (cx + 75, cy - 360)], fill=(245, 245, 245), width=5)
+        
+        draw_hud(draw, 540, 340, "MASSIVE CLOSER MUSCLES WINCH SPRING", "Contraction locks mandibles flat at 180 degrees", color=(255, 100, 120))
+        draw_hud(draw, 540, 1550, f"MANDIBLE SPREAD: {int(angle_deg*2):03d}°",
+                 "Spring latch engages when fully cocked" if open_t < 0.9 else "🔒 LATCH LOCKED (READY TO STRIKE)",
+                 color=(255, 215, 0) if open_t > 0.9 else (200, 225, 255))
+                 
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "trap_jaw_ant_muscle_latch_mechanism.mp4")
+
+def render_ant_explosive_strike(num_frames=285):
+    frames = []
+    cx, cy = 540, 1100
+    prey_y = 680
+    
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (18, 16, 22, 255))
+        draw = ImageDraw.Draw(img)
+        
+        # Airborne Recoil Somersault Jump
+        recoil_y = 0
+        rot_recoil = 0.0
+        if t >= 0.68:
+            jump_t = (t - 0.68) / 0.32
+            recoil_y = int(-math.sin(jump_t * math.pi) * 520)
+            rot_recoil = jump_t * math.pi * 2.0
+            
+        cur_cy = cy + recoil_y
+        
+        # Mandible Snap: 90° -> 8° in 0.06s (super fast!)
+        if t < 0.30:
+            angle_deg = 90
+        elif t < 0.36:
+            snap_t = ease_in_quad((t - 0.30) / 0.06)
+            angle_deg = lerp(90, 8, snap_t)
+        else:
+            angle_deg = 8
+            
+        rad = math.radians(angle_deg)
+        m_len = 410
+        lm_base = (cx - 140, cur_cy - 160)
+        rm_base = (cx + 140, cur_cy - 160)
+        lm_tip = (int(lm_base[0] - m_len * math.sin(rad)), int(lm_base[1] - m_len * math.cos(rad)))
+        rm_tip = (int(rm_base[0] + m_len * math.sin(rad)), int(rm_base[1] - m_len * math.cos(rad)))
+        
+        # Ant Head Capsule
+        head_pts = []
+        head_pts.extend(bezier_curve((cx - 280, cur_cy - 140), (cx - 320, cur_cy + 60), (cx - 300, cur_cy + 240), (cx, cur_cy + 260), steps=15))
+        head_pts.extend(bezier_curve((cx, cur_cy + 260), (cx + 300, cur_cy + 240), (cx + 320, cur_cy + 60), (cx + 280, cur_cy - 140), steps=15))
+        head_pts.extend(bezier_curve((cx + 280, cur_cy - 140), (cx + 180, cur_cy - 180), (cx - 180, cur_cy - 180), (cx - 280, cur_cy - 140), steps=15))
+        draw.polygon(head_pts, fill=(58, 42, 38), outline=(135, 95, 75), width=8)
+        
+        # Mandibles
+        draw.line([lm_base, lm_tip], fill=(235, 140, 90), width=28)
+        draw.line([rm_base, rm_tip], fill=(235, 140, 90), width=28)
+        
+        # Motion Blur Trails during 0.1ms snap
+        if 0.30 <= t <= 0.37:
+            for ghost in np.linspace(0.1, 0.9, 5):
+                g_ang = math.radians(lerp(90, 8, ghost))
+                g_tip_l = (int(lm_base[0] - m_len * math.sin(g_ang)), int(lm_base[1] - m_len * math.cos(g_ang)))
+                g_tip_r = (int(rm_base[0] + m_len * math.sin(g_ang)), int(rm_base[1] - m_len * math.cos(g_ang)))
+                draw.line([lm_base, g_tip_l], fill=(255, 200, 100, 80), width=14)
+                draw.line([rm_base, g_tip_r], fill=(255, 200, 100, 80), width=14)
+                
+        # Prey Insect (Fruit fly)
+        if t < 0.35:
+            draw.ellipse([cx - 44, prey_y - 32, cx + 44, prey_y + 32], fill=(95, 150, 75), outline=(48, 85, 38), width=4)
+            draw.ellipse([cx - 40, prey_y - 20, cx - 20, prey_y], fill=(220, 50, 45))
+        else:
+            # Cut into two halves flying apart
+            split_d = int((t - 0.35) * 700)
+            draw.ellipse([cx - 70 - split_d, prey_y - 32, cx - split_d, prey_y + 32], fill=(95, 150, 75))
+            draw.ellipse([cx + split_d, prey_y - 32, cx + 70 + split_d, prey_y + 32], fill=(95, 150, 75))
+            
+        # Supersonic Shockwave Ring & Sparks
+        if 0.33 <= t <= 0.65:
+            sw_r = int((t - 0.33) * 1150)
+            draw.ellipse([cx - sw_r, prey_y - sw_r//2, cx + sw_r, prey_y + sw_r//2],
+                         outline=(255, 235, 110, max(0, 255 - sw_r // 3)), width=8)
+            for sp in range(8):
+                sx = cx + int(math.cos(sp * 0.8) * sw_r * 0.75)
+                sy = prey_y + int(math.sin(sp * 0.8) * sw_r * 0.45)
+                draw.line([(cx, prey_y), (sx, sy)], fill=(255, 255, 215), width=4)
+                
+        draw_hud(draw, 540, 340, "140 MPH SUPERSONIC STRIKE", "Snaps shut in 0.1ms — 2,300x faster than an eye blink", color=(255, 80, 80))
+        if t < 0.68:
+            draw_hud(draw, 540, 1550, "TRIGGER HAIR TOUCH -> EXPLOSIVE ELASTIC RELEASE", color=(255, 215, 0))
+        else:
+            draw_hud(draw, 540, 1550, "GROUND REACTION: ESCAPE LAUNCH 40CM AIRBORNE", color=(100, 235, 255))
+            
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "trap_jaw_ant_explosive_mandible_strike.mp4")
+
+
+# ==============================================================================
+# 7 & 8: PIT VIPER THERMAL PIT & CAMERA OBSCURA ANIMATIONS
+# ==============================================================================
+def render_viper_loreal_pit(num_frames=255):
+    frames = []
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (14, 18, 24, 255))
+        draw = ImageDraw.Draw(img)
+        
+        # Viper Head Profile (Smooth curved triangular viper skull)
+        v_pts = []
+        v_pts.extend(bezier_curve((140, 950), (140, 640), (450, 560), (740, 680), steps=20))
+        v_pts.extend(bezier_curve((740, 680), (880, 750), (960, 880), (880, 980), steps=20))
+        v_pts.extend(bezier_curve((880, 980), (780, 1060), (400, 1100), (140, 950), steps=20))
+        draw.polygon(v_pts, fill=(52, 105, 62), outline=(26, 62, 34), width=8)
+        
+        # Golden Eyeball with Vertical Cat Slit Pupil
+        eye_cx, eye_cy = 740, 720
+        draw.ellipse([eye_cx - 55, eye_cy - 55, eye_cx + 55, eye_cy + 55], fill=(235, 185, 38), outline=(32, 22, 12), width=6)
+        draw.ellipse([eye_cx - 10, eye_cy - 48, eye_cx + 10, eye_cy + 48], fill=(12, 8, 8)) # Slit pupil
+        draw.ellipse([eye_cx - 24, eye_cy - 28, eye_cx - 10, eye_cy - 14], fill=(255, 255, 255)) # Glint
+        
+        # Loreal Pit Aperture (Between eye and nostril)
+        pit_x, pit_y = 850, 830
+        draw.ellipse([pit_x - 34, pit_y - 28, pit_x + 34, pit_y + 28], fill=(20, 24, 24), outline=(165, 215, 95), width=5)
+        
+        # Zoomed Cross-Section Lens Chamber at Center
+        cx, cy = 540, 1220
+        draw.ellipse([cx - 320, cy - 220, cx + 320, cy + 220], fill=(26, 34, 42), outline=(255, 215, 0), width=6)
+        draw.chord([cx - 280, cy - 180, cx + 280, cy + 180], start=90, end=270, fill=(38, 48, 58)) # Outer chamber
+        draw.chord([cx - 280, cy - 180, cx + 280, cy + 180], start=270, end=90, fill=(16, 22, 28))  # Insulating air cavity
+        
+        # Suspended 15μm Membrane Vibrating
+        vib = math.sin(fi * 0.4) * 6
+        draw.line([(cx + int(vib), cy - 170), (cx + int(vib), cy + 170)], fill=(255, 105, 125), width=8)
+        for my in range(cy - 140, cy + 150, 35):
+            draw.ellipse([cx - 8 + int(vib), my - 8, cx + 8 + int(vib), my + 8], fill=(255, 235, 85))
+            
+        draw_hud(draw, 540, 340, "LOREAL FACIAL PIT CAVITY", "Stereoscopic thermal sensory chambers between eye and nostril", color=(100, 240, 255))
+        draw_hud(draw, 540, 1540, "15-MICROMETER SUSPENDED MEMBRANE", "Packed with TRPA1 infrared-sensitive ion channel receptors", color=(255, 215, 0))
+        
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "pit_viper_loreal_pit_anatomy.mp4")
+
+def render_viper_pinhole_thermal(num_frames=270):
+    frames = []
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (10, 12, 18, 255))
+        draw = ImageDraw.Draw(img)
+        
+        mouse_x = 220
+        mouse_y = int(850 + math.sin(fi * 0.08) * 20)
+        
+        # Warm-Blooded Mouse Silhouette & Heat Radiance
+        draw.ellipse([mouse_x - 90, mouse_y - 50, mouse_x + 90, mouse_y + 50], fill=(255, 65, 25))
+        draw.ellipse([mouse_x + 50, mouse_y - 45, mouse_x + 110, mouse_y + 5], fill=(255, 165, 35))
+        draw.ellipse([mouse_x + 70, mouse_y - 20, mouse_x + 90, mouse_y], fill=(255, 245, 85))
+        draw.line([(mouse_x - 90, mouse_y), (mouse_x - 160, mouse_y + 40)], fill=(205, 45, 25), width=6)
+        
+        # Radiating Infrared Waves
+        for w in range(4):
+            wr = int((fi * 8 + w * 120) % 500)
+            draw.arc([mouse_x - wr, mouse_y - wr, mouse_x + wr, mouse_y + wr],
+                     start=-45, end=45, fill=(255, 85, 25, max(0, 200 - wr // 2)), width=5)
+                     
+        pinhole_x, pinhole_y = 650, 850
+        membrane_x = 880
+        
+        # Pinhole Camera Aperture Wall
+        draw.rectangle([pinhole_x, 500, pinhole_x + 40, pinhole_y - 40], fill=(85, 115, 80))
+        draw.rectangle([pinhole_x, pinhole_y + 40, pinhole_x + 40, 1200], fill=(85, 115, 80))
+        draw.line([(membrane_x, 600), (membrane_x, 1100)], fill=(125, 165, 205), width=10)
+        
+        # Camera Obscura Rays
+        draw.line([(mouse_x + 70, mouse_y - 40), (pinhole_x + 20, pinhole_y), (membrane_x, 1020)],
+                  fill=(255, 225, 85, 225), width=4)
+        draw.line([(mouse_x + 70, mouse_y + 40), (pinhole_x + 20, pinhole_y), (membrane_x, 680)],
+                  fill=(255, 75, 35, 225), width=4)
+                  
+        # Inverted Thermal Projection Map
+        draw.ellipse([membrane_x - 22, 790, membrane_x + 22, 910], fill=(255, 125, 35))
+        draw.ellipse([membrane_x - 16, 730, membrane_x + 16, 795], fill=(255, 235, 65))
+        
+        draw_hud(draw, 540, 340, "PINHOLE CAMERA OBSCURA EFFECT", "Narrow pit aperture optically refracts infrared rays", color=(255, 165, 45))
+        draw_hud(draw, 540, 1540, "INVERTED THERMAL HEATMAP PROJECTION", "Trigeminal nerve superimposes heat map over vision", color=(255, 215, 0))
+        
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "pit_viper_pinhole_thermal_projection.mp4")
+
+
+# ==============================================================================
+# 9 & 10: ARCHERFISH RIFLE BARREL & WATER BULLET ANIMATIONS
+# ==============================================================================
+def render_archerfish_palate_tongue(num_frames=255):
+    frames = []
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (14, 30, 50, 255))
+        draw = ImageDraw.Draw(img)
+        
+        water_surface_y = 650
+        draw.rectangle([0, 0, WIDTH, water_surface_y], fill=(18, 24, 34, 255))
+        draw.rectangle([0, water_surface_y, WIDTH, HEIGHT], fill=(22, 58, 95, 255))
+        draw.line([(0, water_surface_y), (WIDTH, water_surface_y)], fill=(125, 215, 255), width=5)
+        
+        cx, cy = 450, 1050
+        # Archerfish Body (Silver-olive with dark camouflage bands)
+        fish_pts = []
+        fish_pts.extend(bezier_curve((cx - 280, cy + 180), (cx - 100, cy - 80), (cx + 100, cy - 140), (cx + 320, cy - 80), steps=15))
+        fish_pts.extend(bezier_curve((cx + 320, cy - 80), (cx + 300, cy + 180), (cx + 180, cy + 280), (cx - 280, cy + 180), steps=15))
+        draw.polygon(fish_pts, fill=(190, 205, 170), outline=(42, 54, 38), width=8)
+        
+        # Dark vertical bands
+        draw.line([(cx - 80, cy - 40), (cx - 20, cy + 220)], fill=(32, 38, 28), width=32)
+        draw.line([(cx + 60, cy - 90), (cx + 110, cy + 150)], fill=(32, 38, 28), width=28)
+        
+        # Large Golden Targeting Eye near snout
+        draw.ellipse([cx + 90, cy - 120, cx + 180, cy - 30], fill=(250, 220, 45), outline=(22, 22, 12), width=5)
+        draw.ellipse([cx + 120, cy - 100, cx + 160, cy - 60], fill=(10, 10, 10))
+        draw.ellipse([cx + 110, cy - 110, cx + 125, cy - 95], fill=(255, 255, 255))
+        
+        # Palate & Grooved Tongue Rifle Tube
+        press_t = ease_in_out(clamp((t - 0.25) / 0.50))
+        tongue_y = int(lerp(cy + 60, cy + 5, press_t))
+        palate_y = cy
+        
+        # Palate (roof)
+        draw.line([(cx + 180, palate_y - 20), (cx + 310, palate_y - 65)], fill=(225, 125, 135), width=16)
+        # Grooved Tongue pressing up
+        draw.line([(cx + 180, tongue_y + 10), (cx + 300, tongue_y - 35)], fill=(245, 165, 165), width=18)
+        
+        # Pressurized water tube in the sealed barrel
+        if press_t > 0.4:
+            draw.line([(cx + 190, cy - 5), (cx + 305, cy - 50)], fill=(105, 235, 255), width=10)
+            
+        # Operculum (gill cover) hydraulic squeeze
+        gill_squeeze = int(lerp(0, 35, press_t))
+        draw.arc([cx - 140 + gill_squeeze, cy + 20, cx - 40, cy + 180], start=90, end=270, fill=(245, 85, 85), width=8)
+        
+        draw_hud(draw, 540, 340, "GROOVED TONGUE + ROOF PALATE", "Press together to seal a rigid cylindrical rifle barrel", color=(255, 215, 0))
+        draw_hud(draw, 540, 1550, "HYDRAULIC GILL PISTON COMPRESSION", "Gill covers squeeze shut to pressurize the water chamber", color=(100, 230, 255))
+        
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "archerfish_palate_tongue_rifle_barrel.mp4")
+
+def render_archerfish_water_bullet(num_frames=270):
+    frames = []
+    branch_x, branch_y = 880, 480
+    
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (16, 22, 32, 255))
+        draw = ImageDraw.Draw(img)
+        
+        # Water line at bottom
+        draw.rectangle([0, 1400, WIDTH, HEIGHT], fill=(22, 62, 110, 255))
+        draw.line([(0, 1400), (WIDTH, 1400)], fill=(125, 225, 255), width=5)
+        
+        # Overhanging Tree Branch with Leaves
+        draw.line([(branch_x - 300, branch_y + 120), (WIDTH, branch_y - 50)], fill=(95, 70, 50), width=28)
+        draw.ellipse([branch_x - 140, branch_y + 20, branch_x - 30, branch_y + 80], fill=(62, 145, 55))
+        draw.ellipse([branch_x - 20, branch_y - 30, branch_x + 90, branch_y + 30], fill=(72, 160, 65))
+        
+        # Grasshopper Prey
+        gh_alive = t < 0.60
+        gh_x = branch_x - 80
+        gh_y = branch_y + 15
+        if not gh_alive:
+            fall_t = (t - 0.60) / 0.40
+            gh_x += int(fall_t * 60)
+            gh_y += int(fall_t * fall_t * 920)
+            
+        draw.ellipse([gh_x - 32, gh_y - 16, gh_x + 32, gh_y + 16], fill=(85, 185, 65), outline=(32, 98, 28), width=4)
+        draw.line([(gh_x + 10, gh_y), (gh_x + 35, gh_y - 25)], fill=(85, 185, 65), width=5)
+        
+        # Water Bullet Trajectory & Mid-Air Coalescence
+        mouth_x, mouth_y = 260, 1380
+        target = (branch_x - 90, branch_y + 15)
+        
+        if t < 0.20:
+            bullet_pos = (mouth_x, mouth_y)
+        elif t < 0.60:
+            flight_t = (t - 0.20) / 0.40
+            bullet_pos = lerp_pt((mouth_x, mouth_y), target, ease_out_quad(flight_t))
+            # Trailing stream getting thinner as trailing water catches up
+            draw.line([(mouth_x, mouth_y), bullet_pos], fill=(125, 215, 255, 165), width=int(lerp(6, 24, flight_t)))
+            # Dense high-mass water bullet head
+            drop_r = int(lerp(14, 40, flight_t))
+            draw.ellipse([bullet_pos[0] - drop_r, bullet_pos[1] - drop_r, bullet_pos[0] + drop_r, bullet_pos[1] + drop_r],
+                         fill=(185, 245, 255, 240), outline=(255, 255, 255), width=4)
+        else:
+            bullet_pos = target
+            spl_t = (t - 0.60) / 0.40
+            # High-impact splash droplets
+            for sp in range(14):
+                ang = sp * (2 * math.pi / 14)
+                sp_d = int(spl_t * 380)
+                sx = target[0] + int(math.cos(ang) * sp_d)
+                sy = target[1] + int(math.sin(ang) * sp_d * 0.7)
+                draw.ellipse([sx - 9, sy - 9, sx + 9, sy + 9], fill=(185, 240, 255, max(0, 255 - sp_d)))
+                
+        draw_hud(draw, 540, 320, "MID-AIR WATER BULLET COALESCENCE", "Trailing water moves faster than front, bunching into a slug", color=(100, 230, 255))
+        if t < 0.60:
+            draw_hud(draw, 540, 1550, "VELOCITY: 5 M/S -> IMPACT MASS CONCENTRATION", color=(255, 215, 0))
+        else:
+            draw_hud(draw, 540, 1550, "6X KINETIC FORCE KNOCKS PREY OFF PERCH", color=(255, 100, 100))
+            
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "archerfish_water_bullet_coalescence_strike.mp4")
+
+
+# ==============================================================================
+# 11 & 12: CROCODILE JAW MUSCLE BITE & DEATH ROLL ANIMATIONS
+# ==============================================================================
+def render_crocodile_jaw_muscle_bite(num_frames=255):
+    frames = []
+    cx, cy = 420, 950
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (20, 24, 22, 255))
+        draw = ImageDraw.Draw(img)
+        
+        clamp_t = ease_in_out(clamp((t - 0.25) / 0.45))
+        gape_deg = lerp(40, 4, clamp_t)
+        rad = math.radians(gape_deg)
+        
+        # Armored Upper Skull (Scutes, ridges, raised eye crest)
+        upper_pts = []
+        upper_pts.extend(bezier_curve((cx - 260, cy - 140), (cx - 100, cy - 180), (cx + 200, cy - 120), (cx + 440, cy - 40), steps=15))
+        upper_pts.extend([(cx + 460, cy), (cx - 200, cy + 20)])
+        draw.polygon(upper_pts, fill=(58, 80, 64), outline=(24, 42, 30), width=8)
+        
+        # Amber Eye with Slit Pupil
+        draw.ellipse([cx - 50, cy - 170, cx + 20, cy - 100], fill=(240, 185, 40), outline=(20, 15, 10), width=5)
+        draw.ellipse([cx - 20, cy - 160, cx - 10, cy - 110], fill=(10, 10, 10))
+        
+        # Lower Jaw Swinging Shut on Pivot
+        low_end_x = int(cx + 450 * math.cos(rad))
+        low_end_y = int(cy + 450 * math.sin(rad))
+        draw.line([(cx - 200, cy + 40), (low_end_x, low_end_y)], fill=(78, 100, 76), width=44)
+        
+        # Interlocking Conical Teeth
+        for tx in range(cx - 80, cx + 420, 55):
+            draw.polygon([(tx, cy), (tx + 12, cy + 30), (tx - 12, cy + 30)], fill=(245, 245, 235))
+            draw.polygon([(tx + 25, low_end_y), (tx + 37, low_end_y - 30), (tx + 13, low_end_y - 30)], fill=(245, 245, 235))
+            
+        # Massive Pterygoid Closer Muscle Spindle (Bulging to massive size)
+        m_thick = int(lerp(55, 150, clamp_t))
+        draw.ellipse([cx - 220, cy - 100, cx - 10, cy - 100 + m_thick * 2], fill=(195, 42, 58), outline=(115, 20, 32), width=6)
+        for s in range(5):
+            sy = cy - 80 + s * int(m_thick * 0.38)
+            draw.line([(cx - 200, sy), (cx - 30, sy)], fill=(255, 110, 125), width=5)
+            
+        # Screen Shake and High-Impact Spark on Clamping
+        if clamp_t > 0.95:
+            shake = int(math.sin(fi * 2.0) * 10)
+            draw.line([(cx + 400 + shake, cy - 70), (cx + 400 + shake, cy + 70)], fill=(255, 235, 85), width=8)
+            draw.ellipse([cx + 380 + shake, cy - 30, cx + 440 + shake, cy + 30], fill=(255, 255, 180, 200))
+            
+        draw_hud(draw, 540, 340, "MASSIVE PTERYGOID CLOSER MUSCLES", "Fill the rear skull to generate 3,700 lbs crushing force", color=(255, 100, 120))
+        draw_hud(draw, 540, 1550, f"BITE PRESSURE: {int(clamp_t*3700):,d} LBS/IN²",
+                 "Conical teeth lock prey with zero lateral chewing motion", color=(255, 215, 0))
+                 
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "crocodile_pterygoid_jaw_muscle_bite.mp4")
+
+def render_crocodile_death_roll(num_frames=285):
+    frames = []
+    cx, cy = 540, 960
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (14, 38, 58, 255))
+        draw = ImageDraw.Draw(img)
+        
+        spin_t = ease_in_quad(clamp((t - 0.20) / 0.60))
+        angle = fi * (0.1 + spin_t * 0.7)
+        
+        # Hydrodynamic Vortex Swirls
+        for vr in range(120, 600, 85):
+            rot_r = int((angle * 40 + vr) % 600)
+            alpha = int(max(0, min(255, 180 - rot_r // 3)))
+            draw.ellipse([cx - rot_r, cy - rot_r//2, cx + rot_r, cy + rot_r//2],
+                         outline=(85, 185, 240, alpha), width=6)
+                         
+        # Rotating Armored Crocodile Body (Limbs tucked tight)
+        body_w = int(250 + math.cos(angle) * 85)
+        body_h = int(125 + math.sin(angle) * 65)
+        
+        draw.ellipse([cx - body_w, cy - body_h, cx + body_w, cy + body_h], fill=(48, 78, 58), outline=(22, 42, 28), width=8)
+        # Rotational speed trails
+        draw.arc([cx - 360, cy - 260, cx + 360, cy + 260], start=int(math.degrees(angle)), end=int(math.degrees(angle) + 130),
+                 fill=(205, 245, 255), width=12)
+                 
+        draw_hud(draw, 540, 340, "ROTATIONAL INERTIA REDUCTION", "Tucks limbs against torso to spin like a high-speed drill", color=(100, 230, 255))
+        draw_hud(draw, 540, 1550, f"DEATH ROLL ROTATION: {int(spin_t*300):03d} RPM",
+                 "Rotational shear torque tears meat along anatomical fault lines", color=(255, 215, 0))
+                 
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "crocodile_death_roll_rotational_inertia.mp4")
+
+
+# ==============================================================================
+# 13 & 14: ELECTRIC EEL ELECTROCYTE COLUMNS & LIGHTNING DISCHARGE
+# ==============================================================================
+def render_eel_electrocyte_stacks(num_frames=255):
+    frames = []
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img = Image.new("RGBA", (WIDTH, HEIGHT), (12, 24, 38, 255))
+        draw = ImageDraw.Draw(img)
+        
+        # Eel Body Cutaway Profile
+        draw.rounded_rectangle([180, 500, WIDTH - 180, 1400], radius=80, fill=(28, 48, 64), outline=(55, 95, 125), width=6)
+        
+        # 5 Columns of 22 Disc Electrocytes Stacked in Series (like coins)
+        cols = 5
+        discs_per_col = 22
+        for c in range(cols):
+            col_x = 260 + c * 135
+            for d in range(discs_per_col):
+                col_y = 560 + d * 36
+                draw.ellipse([col_x - 45, col_y - 12, col_x + 45, col_y + 12],
+                             fill=(65, 115, 150), outline=(125, 205, 245), width=2)
+                             
+        # Cellular Zoom Inset
+        zoom_cx, zoom_cy = 540, 1250
+        draw.ellipse([zoom_cx - 250, zoom_cy - 120, zoom_cx + 250, zoom_cy + 120],
+                     fill=(22, 38, 54), outline=(255, 215, 0), width=6)
+        draw.text((zoom_cx - 170, zoom_cy - 20), "INACTIVE (-)", font=get_font(28, bold=True), fill=(145, 185, 225))
+        draw.text((zoom_cx + 50, zoom_cy - 20), "SODIUM Na+", font=get_font(28, bold=True), fill=(255, 205, 65))
+        
+        draw_hud(draw, 540, 320, "6,000 ELECTROCYTES IN SERIES", "Occupies over 80% of the entire body volume", color=(100, 230, 255))
+        draw_hud(draw, 540, 1550, "STACKED LIKE ROLLS OF COINS", "Each disc cell produces 0.15 volts at rest", color=(255, 215, 0))
+        
+        frame = cv2.cvtColor(np.array(img), cv2.COLOR_RGBA2BGR)
+        frames.append(frame)
+    return save_mp4(frames, "electric_eel_electrocyte_stack_columns.mp4")
+
+def render_eel_lightning_discharge(num_frames=285):
+    frames = []
+    np.random.seed(42)
+    for fi in range(num_frames):
+        t = fi / num_frames
+        img_np = np.full((HEIGHT, WIDTH, 3), (14, 20, 28), dtype=np.uint8)
+        
+        eel_y1, eel_y2 = 450, 1350
+        cv2.rectangle(img_np, (350, eel_y1), (730, eel_y2), (48, 68, 85), -1)
+        cv2.rectangle(img_np, (350, eel_y1), (730, eel_y2), (125, 185, 225), 4)
+        
+        discharge_t = ease_in_quad(clamp((t - 0.25) / 0.50))
+        voltage = int(discharge_t * 860)
+        
+        # Branching Lightning Plasma Arcs through Water
+        if discharge_t > 0.4:
+            num_bolts = int(lerp(2, 9, (discharge_t - 0.4) / 0.6))
+            for b in range(num_bolts):
+                p1 = (np.random.randint(380, 700), np.random.randint(eel_y1 + 50, eel_y2 - 50))
+                p2 = (np.random.choice([np.random.randint(40, 250), np.random.randint(830, 1040)]),
+                      np.random.randint(300, 1600))
+                
+                # Lightning drawing helper
+                dist = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+                steps = max(5, int(dist / 25))
+                pts = [p1]
+                dx = (p2[0] - p1[0]) / steps
+                dy = (p2[1] - p1[1]) / steps
+                for i in range(1, steps):
+                    jx = np.random.uniform(-25, 25)
+                    jy = np.random.uniform(-25, 25)
+                    pts.append((int(p1[0] + dx * i + jx), int(p1[1] + dy * i + jy)))
+                pts.append(p2)
+                
+                # Outer glow & core
+                for i in range(len(pts) - 1):
+                    cv2.line(img_np, pts[i], pts[i+1], (0, 120, 255), 14)
+                for i in range(len(pts) - 1):
+                    cv2.line(img_np, pts[i], pts[i+1], (0, 255, 255), 5)
+                for i in range(len(pts) - 1):
+                    cv2.line(img_np, pts[i], pts[i+1], (255, 255, 255), 2)
+                    
+        img_pil = Image.fromarray(img_np)
+        draw = ImageDraw.Draw(img_pil)
+        
+        draw_hud(draw, 540, 320, "SERIES VOLTAGE MULTIPLICATION", "0.15V x 6,000 cells synchronizing in 1 millisecond", color=(100, 240, 255))
+        draw_hud(draw, 540, 1550, f"VOLTAGE DISCHARGE: {voltage:03d} VOLTS",
+                 "Enough electrical power to stun an adult horse" if voltage > 600 else "Sodium ion channels opening in series",
+                 color=(255, 235, 50) if voltage > 600 else (200, 225, 255))
+                 
+        frames.append(cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR))
+    return save_mp4(frames, "electric_eel_series_voltage_lightning_discharge.mp4")
+
+
+# ==============================================================================
+# BATCH EXECUTION ENTRY POINT
+# ==============================================================================
+def render_all_animations():
+    print("🚀 Rendering all 14 high-end realistic cartoon animation sequences...", flush=True)
+    animations = [
+        ("Frog Muscle Compression", render_frog_muscle_compression),
+        ("Frog Tongue Launch", render_frog_tongue_launch),
+        ("Otter Fur Density", render_otter_fur_density),
+        ("Otter Air Bubble Barrier", render_otter_air_bubble_barrier),
+        ("Ant Muscle Latch", render_ant_muscle_latch),
+        ("Ant Explosive Strike", render_ant_explosive_strike),
+        ("Pit Viper Loreal Pit", render_viper_loreal_pit),
+        ("Pit Viper Pinhole Thermal", render_viper_pinhole_thermal),
+        ("Archerfish Palate Tongue", render_archerfish_palate_tongue),
+        ("Archerfish Water Bullet", render_archerfish_water_bullet),
+        ("Crocodile Jaw Muscle Bite", render_crocodile_jaw_muscle_bite),
+        ("Crocodile Death Roll", render_crocodile_death_roll),
+        ("Electric Eel Electrocyte Stacks", render_eel_electrocyte_stacks),
+        ("Electric Eel Lightning Discharge", render_eel_lightning_discharge),
+    ]
+    for idx, (name, fn) in enumerate(animations, 1):
+        print(f"🎬 [{idx}/14] Rendering {name}...", flush=True)
+        fn()
+    print("🎉 All 14 high-end realistic cartoon animations rendered successfully!", flush=True)
+
+if __name__ == "__main__":
+    render_all_animations()
+
+
+
+
+
+
